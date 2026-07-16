@@ -1,20 +1,32 @@
 {% extends "base.html" %}
-{% block title %}Пользователи — RPi Signage{% endblock %}
+{% block title %}Пользователи — Signage{% endblock %}
 {% block content %}
-<h1>Пользователи</h1>
+<div class="topbar"><h1>Пользователи</h1></div>
 
-<form method="post" action="/users/create" class="inline-form panel" autocomplete="off">
-  <input type="text" name="username" placeholder="Логин" required>
-  <input type="password" name="password" placeholder="Пароль (мин. 8 символов)"
-         required minlength="8" autocomplete="new-password">
-  <button type="submit" class="btn primary">Создать</button>
-</form>
+<div class="panel"><div class="p-body">
+  <form method="post" action="/users/create" class="inline-form" autocomplete="off">
+    <input type="text" name="username" placeholder="Логин" required>
+    <input type="password" name="password" placeholder="Пароль (мин. 8 символов)"
+           required minlength="8" autocomplete="new-password">
+    <select name="role" id="role-select" onchange="document.getElementById('city-select').style.display = this.value === 'manager' ? '' : 'none'">
+      <option value="admin">Администратор</option>
+      <option value="manager">Менеджер города</option>
+    </select>
+    <select name="city_id" id="city-select" style="display:none">
+      <option value="0">— город —</option>
+      {% for c in cities %}<option value="{{ c.id }}">{{ c.name }}</option>{% endfor %}
+    </select>
+    <button type="submit" class="btn primary">Создать</button>
+  </form>
+</div></div>
 
 <table class="table">
-  <tr><th>Логин</th><th>Создан</th><th>Сменить пароль</th><th></th></tr>
+  <tr><th>Логин</th><th>Роль</th><th>Создан</th><th>Сменить пароль</th><th></th></tr>
   {% for u in users %}
   <tr>
-    <td>{{ u.username }}{% if u.id == user.id %} <span class="badge muted">это вы</span>{% endif %}</td>
+    <td>{{ u.username }}{% if u.id == user.id %} <span class="chip mut">это вы</span>{% endif %}</td>
+    <td>{% if u.is_admin %}<span class="chip acc">администратор</span>
+        {% else %}<span class="chip mut">менеджер · {{ u.city.name if u.city else '?' }}</span>{% endif %}</td>
     <td class="small">{{ u.created_at|dt }}</td>
     <td>
       <form method="post" action="/users/{{ u.id }}/password" class="inline-form">

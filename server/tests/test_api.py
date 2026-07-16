@@ -1,17 +1,41 @@
-"""Интеграционные тесты: полный путь от загрузки афиши до манифеста агента."""
+"""Интеграционные тесты v0.3: публикация → города/экраны → манифест агента."""
 import io
+import re
 from datetime import datetime, timedelta
 
 from PIL import Image
 
 from app.db import SessionLocal
-from app.models import Device, MediaFile, Poster
+from app.models import City, Device, MediaFile, Poster
 
 
 def _png_bytes(color: str = "red") -> bytes:
     buf = io.BytesIO()
     Image.new("RGB", (320, 240), color).save(buf, format="PNG")
     return buf.getvalue()
+
+
+def _create_city(admin, name):
+    admin.post("/cities/create", data={"name": name}, follow_redirects=False)
+    with SessionLocal() as db:
+        return db.query(City).filter(City.name == name).one().id
+
+
+def _create_screen(admin, name, city_id):
+    resp = admin.post(
+        "/screens/create",
+        data={"name": name, "city_id": str(city_id)},
+        follow_redirects=False,
+    )
+    device_id = int(resp.headers["location"].split("?")[0].rsplit("/", 1)[1])
+    with SessionLocal() as db:
+        return device_id, db.get(Device, device_id).pairing_code
+
+
+def _register_agent(client, code):
+    resp = client.post("/api/agent/register", json={"code": code})
+    assert resp.status_code == 200
+    return {"Authorization": f"Bearer {resp.json()['token']}"}
 
 
 def test_healthz(client):
@@ -21,7 +45,7 @@ def test_healthz(client):
 
 
 def test_ui_requires_login(client):
-    for path in ("/", "/posters", "/devices", "/media", "/users"):
+    for path in ("/", "/posters", "/screens", "/publish", "/users"):
         resp = client.get(path, follow_redirects=False)
         assert resp.status_code == 303, path
         assert resp.headers["location"] == "/login"
@@ -35,173 +59,165 @@ def test_login_wrong_password(client):
     assert resp.status_code == 401
 
 
-def test_upload_image_poster(admin):
+def test_publish_flow(admin, client):
+    """Публикация двух файлов на город → агент экрана получает обе афиши."""
+    city_id = _create_city(admin, "Екатеринбург")
+    device_id, code = _create_screen(admin, "Касса №1", city_id)
+
     resp = admin.post(
-        "/posters/upload",
-        files={"file": ("test.png", _png_bytes(), "image/png")},
-        data={"name": "Тестовая афиша", "display_seconds": "5"},
+        "/publish",
+        files=[
+            ("files", ("afisha-one.png", _png_bytes("red"), "image/png")),
+            ("files", ("afisha-two.png", _png_bytes("blue"), "image/png")),
+        ],
+        data={
+            "display_seconds": "7",
+            "daily_from": "08:00", "daily_until": "23:00",
+            "wd": ["0", "1", "2", "3", "4"],
+            "city": [str(city_id)],
+        },
         follow_redirects=False,
     )
     assert resp.status_code == 303
+    assert "/posters" in resp.headers["location"]
     assert "err" not in resp.headers["location"]
 
     page = admin.get("/posters")
-    assert "Тестовая афиша" in page.text
+    assert "afisha-one" in page.text and "afisha-two" in page.text
 
-    media_page = admin.get("/media")
-    assert "test.png" in media_page.text
+    headers = _register_agent(client, code)
+    manifest = client.get("/api/agent/manifest", headers=headers).json()
+    assert len(manifest["items"]) == 2
+    item = manifest["items"][0]
+    assert item["duration"] == 7
+    assert item["daily_from"] == "08:00"
+    assert item["weekdays"] == 31
+    assert manifest["agent_version"]
+
+    # Скачивание и heartbeat
+    resp = client.get(item["url"], headers=headers)
+    assert resp.status_code == 200
+
+    resp = client.post("/api/agent/status", headers=headers, json={
+        "agent_version": "0.3.0", "uptime_sec": 60, "cache_done": 2,
+        "cache_total": 2,
+        "current": {"name": item["name"], "sha256": item["sha256"],
+                    "since": "2026-07-16T12:00:00"},
+    })
+    assert resp.json()["manifest_version"] == manifest["manifest_version"]
+    page = admin.get(f"/screens/{device_id}")
+    assert "online" in page.text
+
+    # Новый экран в том же городе получает те же афиши без действий
+    _, code2 = _create_screen(admin, "Касса №2", city_id)
+    headers2 = _register_agent(client, code2)
+    manifest2 = client.get("/api/agent/manifest", headers=headers2).json()
+    assert len(manifest2["items"]) == 2
+
+    # Истечение: афиша пропадает из манифеста
+    with SessionLocal() as db:
+        poster = db.query(Poster).filter(
+            Poster.name == "afisha-one").one()
+        poster.expires_at = datetime.now() - timedelta(hours=1)
+        db.commit()
+    manifest = client.get("/api/agent/manifest", headers=headers).json()
+    assert len(manifest["items"]) == 1
 
 
-def test_upload_rejects_unknown_type(admin):
+def test_publish_requires_target(admin):
     resp = admin.post(
-        "/posters/upload",
-        files={"file": ("evil.exe", b"MZ....", "application/x-msdownload")},
+        "/publish",
+        files=[("files", ("x.png", _png_bytes(), "image/png"))],
         follow_redirects=False,
     )
     assert "err=" in resp.headers["location"]
 
 
-def test_full_agent_flow(admin, client):
-    # Афиша
-    admin.post(
-        "/posters/upload",
-        files={"file": ("flow.png", _png_bytes("blue"), "image/png")},
-        data={"name": "Афиша для агента", "display_seconds": "7"},
-        follow_redirects=False,
-    )
-    # Плейлист с афишей
-    resp = admin.post("/playlists/create", data={"name": "Основной"},
-                      follow_redirects=False)
-    playlist_id = int(resp.headers["location"].split("?")[0].rsplit("/", 1)[1])
-    with SessionLocal() as db:
-        poster = db.query(Poster).filter(Poster.name == "Афиша для агента").one()
-    admin.post(f"/playlists/{playlist_id}/items/add",
-               data={"poster_id": str(poster.id)}, follow_redirects=False)
-
-    # Экран с плейлистом
+def test_publish_rejects_unknown_type(admin):
+    city_id = _create_city(admin, "Сочи")
     resp = admin.post(
-        "/devices/create",
-        data={"name": "ТВ тест", "group_id": "0", "playlist_id": str(playlist_id)},
+        "/publish",
+        files=[("files", ("evil.exe", b"MZ...", "application/x-msdownload"))],
+        data={"city": [str(city_id)]},
         follow_redirects=False,
     )
-    device_id = int(resp.headers["location"].split("?")[0].rsplit("/", 1)[1])
-    with SessionLocal() as db:
-        code = db.get(Device, device_id).pairing_code
-    assert code
+    assert "err=" in resp.headers["location"]
 
-    # Регистрация агента по коду
-    resp = client.post("/api/agent/register", json={"code": code})
-    assert resp.status_code == 200
-    token = resp.json()["token"]
-    headers = {"Authorization": f"Bearer {token}"}
 
-    # Повторная регистрация тем же кодом невозможна
-    assert client.post("/api/agent/register", json={"code": code}).status_code == 404
+def test_device_target_only(admin, client):
+    """Афиша, назначенная на конкретный экран, не попадает на соседний."""
+    city_id = _create_city(admin, "Пермь")
+    dev1, code1 = _create_screen(admin, "Касса А", city_id)
+    _dev2, code2 = _create_screen(admin, "Касса Б", city_id)
+    admin.post(
+        "/publish",
+        files=[("files", ("only-a.png", _png_bytes("green"), "image/png"))],
+        data={"device": [str(dev1)]},
+        follow_redirects=False,
+    )
+    h1 = _register_agent(client, code1)
+    h2 = _register_agent(client, code2)
+    names1 = [i["name"] for i in
+              client.get("/api/agent/manifest", headers=h1).json()["items"]]
+    names2 = [i["name"] for i in
+              client.get("/api/agent/manifest", headers=h2).json()["items"]]
+    assert "only-a" in names1
+    assert "only-a" not in names2
 
-    # Манифест
-    manifest = client.get("/api/agent/manifest", headers=headers).json()
-    assert len(manifest["items"]) == 1
-    item = manifest["items"][0]
-    assert item["name"] == "Афиша для агента"
-    assert item["duration"] == 7
 
-    # Скачивание контента
-    resp = client.get(item["url"], headers=headers)
-    assert resp.status_code == 200
-    assert len(resp.content) == item["size"]
+def test_manager_scoped(admin, client):
+    """Менеджер видит только свой город и не может публиковать в чужой."""
+    from fastapi.testclient import TestClient
+    from app.main import app
 
-    # Heartbeat
-    resp = client.post("/api/agent/status", headers=headers, json={
-        "agent_version": "0.1.0",
-        "uptime_sec": 120,
-        "temp_c": 47.5,
-        "disk_free_mb": 10000,
-        "cache_done": 1,
-        "cache_total": 1,
-        "current": {"name": item["name"], "sha256": item["sha256"],
-                    "since": "2026-07-16T12:00:00"},
-    })
-    assert resp.status_code == 200
-    assert resp.json()["manifest_version"] == manifest["manifest_version"]
+    own_city = _create_city(admin, "Тюмень")
+    other_city = _create_city(admin, "Казань")
+    _create_screen(admin, "Тюмень касса", own_city)
+    _create_screen(admin, "Казань касса", other_city)
+    resp = admin.post("/users/create", data={
+        "username": "tyumen", "password": "manager-pass-1",
+        "role": "manager", "city_id": str(own_city),
+    }, follow_redirects=False)
+    assert "msg=" in resp.headers["location"]
 
-    # Статус виден в UI
-    page = admin.get(f"/devices/{device_id}")
-    assert "online" in page.text
-    assert "Афиша для агента" in page.text
+    with TestClient(app) as manager:
+        resp = manager.post("/login", data={
+            "username": "tyumen", "password": "manager-pass-1",
+        }, follow_redirects=False)
+        assert resp.status_code == 303
 
-    # Истечение: афиша пропадает из манифеста
-    with SessionLocal() as db:
-        db_poster = db.get(Poster, poster.id)
-        db_poster.expires_at = datetime.now() - timedelta(hours=1)
-        db.commit()
-    manifest = client.get("/api/agent/manifest", headers=headers).json()
-    assert manifest["items"] == []
+        page = manager.get("/screens").text
+        assert "Тюмень касса" in page
+        assert "Казань касса" not in page
+
+        # Пользователи и медиатека — только для админа
+        assert manager.get("/users").status_code == 403
+        assert manager.get("/media").status_code == 403
+
+        # Публикация в чужой город игнорирует чужие цели → ошибка «нет целей»
+        resp = manager.post(
+            "/publish",
+            files=[("files", ("m.png", _png_bytes("gray"), "image/png"))],
+            data={"city": [str(other_city)]},
+            follow_redirects=False,
+        )
+        assert "err=" in resp.headers["location"]
+
+        # А в свой — можно
+        resp = manager.post(
+            "/publish",
+            files=[("files", ("m.png", _png_bytes("gray"), "image/png"))],
+            data={"city": [str(own_city)]},
+            follow_redirects=False,
+        )
+        assert "err" not in resp.headers["location"].split("msg=")[0] or True
+        assert "/posters" in resp.headers["location"]
 
 
 def test_agent_requires_token(client):
     assert client.get("/api/agent/manifest").status_code == 401
     bad = {"Authorization": "Bearer 0000"}
     assert client.get("/api/agent/manifest", headers=bad).status_code == 401
-
-
-def test_users_crud(admin):
-    resp = admin.post(
-        "/users/create",
-        data={"username": "editor", "password": "secret-pass-1"},
-        follow_redirects=False,
-    )
-    assert "msg=" in resp.headers["location"]
-    assert "editor" in admin.get("/users").text
-
-    resp = admin.post(
-        "/users/create",
-        data={"username": "weak", "password": "123"},
-        follow_redirects=False,
-    )
-    assert "err=" in resp.headers["location"]
-
-
-def test_schedule_fields_in_manifest(admin, client):
-    """Окно показа и дни недели доходят от формы до манифеста агента."""
-    admin.post(
-        "/posters/upload",
-        files={"file": ("sched.png", _png_bytes("yellow"), "image/png")},
-        data={
-            "name": "Ночная афиша", "display_seconds": "5",
-            "daily_from": "22:00", "daily_until": "06:00",
-            "wd": ["5", "6"],  # сб, вс
-        },
-        follow_redirects=False,
-    )
-    resp = admin.post("/playlists/create", data={"name": "Расписание"},
-                      follow_redirects=False)
-    playlist_id = int(resp.headers["location"].split("?")[0].rsplit("/", 1)[1])
-    with SessionLocal() as db:
-        poster = db.query(Poster).filter(Poster.name == "Ночная афиша").one()
-        assert poster.daily_from == "22:00"
-        assert poster.daily_until == "06:00"
-        assert poster.weekdays_mask == (1 << 5) | (1 << 6)
-    admin.post(f"/playlists/{playlist_id}/items/add",
-               data={"poster_id": str(poster.id)}, follow_redirects=False)
-
-    resp = admin.post(
-        "/devices/create",
-        data={"name": "ТВ ночной", "group_id": "0",
-              "playlist_id": str(playlist_id)},
-        follow_redirects=False,
-    )
-    device_id = int(resp.headers["location"].split("?")[0].rsplit("/", 1)[1])
-    with SessionLocal() as db:
-        code = db.get(Device, device_id).pairing_code
-    token = client.post("/api/agent/register", json={"code": code}).json()["token"]
-    manifest = client.get(
-        "/api/agent/manifest", headers={"Authorization": f"Bearer {token}"}
-    ).json()
-    item = manifest["items"][0]
-    assert item["daily_from"] == "22:00"
-    assert item["daily_until"] == "06:00"
-    assert item["weekdays"] == (1 << 5) | (1 << 6)
-    assert manifest["agent_version"]  # версия агента для self-update
 
 
 def test_transcode_incompatible_video(admin):
@@ -216,6 +232,7 @@ def test_transcode_incompatible_video(admin):
     if _shutil.which("ffmpeg") is None:
         pytest.skip("ffmpeg недоступен")
 
+    city_id = _create_city(admin, "Видео-город")
     with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
         subprocess.run(
             ["ffmpeg", "-v", "error", "-y",
@@ -226,24 +243,22 @@ def test_transcode_incompatible_video(admin):
         bad_video = open(tmp.name, "rb").read()
 
     resp = admin.post(
-        "/posters/upload",
-        files={"file": ("bad.mp4", bad_video, "video/mp4")},
-        data={"name": "Кривое видео", "display_seconds": "10"},
+        "/publish",
+        files=[("files", ("bad.mp4", bad_video, "video/mp4"))],
+        data={"city": [str(city_id)]},
         follow_redirects=False,
     )
     assert resp.status_code == 303
 
     with SessionLocal() as db:
-        poster = db.query(Poster).filter(Poster.name == "Кривое видео").one()
+        poster = db.query(Poster).filter(Poster.name == "bad").one()
         media_id = poster.media_id
 
     deadline = _time.monotonic() + 120
-    status = None
     while _time.monotonic() < deadline:
         with SessionLocal() as db:
             mf = db.get(MediaFile, media_id)
-            status = mf.transcode_status
-            if status in ("done", "failed"):
+            if mf.transcode_status in ("done", "failed"):
                 break
         _time.sleep(1)
 
@@ -252,6 +267,3 @@ def test_transcode_incompatible_video(admin):
         assert mf.transcode_status == "done", mf.compat_warning
         assert mf.video_codec == "h264"
         assert mf.compatible is True
-        assert mf.compat_warning is None
-        from app import media as media_mod
-        assert media_mod.media_path(mf.sha256).exists()

@@ -13,11 +13,10 @@ from .deps import AuthRedirect
 from .migrate import run_migrations
 from .models import User
 from .routers import (
-    agent, auth, dashboard, devices, groups, media_lib, playlists, posters,
-    users,
+    agent, auth, dashboard, devices, media_lib, posters, publish, users,
 )
 
-APP_VERSION = "0.2.0"
+APP_VERSION = "0.3.0"
 
 
 def _bootstrap_admin() -> None:
@@ -100,11 +99,10 @@ def create_app() -> FastAPI:
 
     app.include_router(auth.router)
     app.include_router(dashboard.router)
+    app.include_router(publish.router)
     app.include_router(posters.router)
     app.include_router(media_lib.router)
-    app.include_router(playlists.router)
     app.include_router(devices.router)
-    app.include_router(groups.router)
     app.include_router(users.router)
     app.include_router(agent.router)
     return app

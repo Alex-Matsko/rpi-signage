@@ -1,115 +1,43 @@
 {% extends "base.html" %}
-{% block title %}Афиши — RPi Signage{% endblock %}
+{% block title %}Афиши — Signage{% endblock %}
 {% block content %}
-<h1>Афиши</h1>
-
-<details class="panel" {{ 'open' if not posters }}>
-  <summary>➕ Загрузить новую афишу</summary>
-  <form method="post" action="/posters/upload" enctype="multipart/form-data" class="grid-form">
-    <label>Файл (JPEG, PNG, MP4)
-      <input type="file" name="file" accept="image/jpeg,image/png,video/mp4" required>
-    </label>
-    <label>Название (по умолчанию — имя файла)
-      <input type="text" name="name" placeholder="Афиша концерта">
-    </label>
-    <label>Показ изображения, сек
-      <input type="number" name="display_seconds" value="10" min="1" max="3600">
-    </label>
-    <label>Начало показа (опционально)
-      <input type="datetime-local" name="starts_at">
-    </label>
-    <label>Истекает (опционально)
-      <input type="datetime-local" name="expires_at">
-    </label>
-    <label>Ежедневно с … по … (опционально)
-      <span class="inline-form">
-        <input type="time" name="daily_from">
-        <input type="time" name="daily_until">
-      </span>
-    </label>
-    <label>Дни недели (пусто = все)
-      <span class="inline-form wd-row">
-        {% for d in WEEKDAY_NAMES %}
-        <label class="compact"><input type="checkbox" name="wd" value="{{ loop.index0 }}"> {{ d }}</label>
-        {% endfor %}
-      </span>
-    </label>
-    <label>Сразу добавить в плейлист
-      <select name="playlist_id">
-        <option value="0">— не добавлять —</option>
-        {% for pl in playlists %}<option value="{{ pl.id }}">{{ pl.name }}</option>{% endfor %}
-      </select>
-    </label>
-    <button type="submit" class="btn primary">Загрузить</button>
-  </form>
-  <p class="muted small">Видео: H.264 (AVC), до 1920×1080, до 30 fps — иначе
-    RPi 2/3/4 не смогут аппаратно декодировать.</p>
-</details>
-
-{% for p in posters %}
-{% set label, cls = POSTER_STATUS[p.status] %}
-<div class="poster-row">
-  <img class="thumb" src="/thumbs/{{ p.media.sha256 }}.jpg" alt=""
-       onerror="this.style.visibility='hidden'">
-  <div class="poster-main">
-    <div class="poster-title">
-      <span class="badge {{ cls }}">{{ label }}</span>
-      <span class="badge muted">{{ 'видео ' + (p.media.duration_sec|duration) if p.media.kind == 'video' else 'изображение' }}</span>
-      {% if p.media.transcode_status in TRANSCODE_STATUS %}
-        {% set tlabel, tcls = TRANSCODE_STATUS[p.media.transcode_status] %}
-        <span class="badge {{ tcls }}" title="{{ p.media.compat_warning or '' }}">⚙ {{ tlabel }}</span>
-      {% elif p.media.compat_warning %}
-        <span class="badge warn" title="{{ p.media.compat_warning }}">⚠ совместимость</span>
-      {% endif %}
-      {% set sched = p|schedule %}
-      {% if sched %}<span class="badge muted" title="Окно показа">🕒 {{ sched }}</span>{% endif %}
-      <span class="muted small">{{ p.media.orig_name }} · {{ p.media.size_bytes|filesize }}</span>
-    </div>
-    <form method="post" action="/posters/{{ p.id }}/update" class="inline-form">
-      <input type="text" name="name" value="{{ p.name }}" class="grow" required>
-      {% if p.media.kind == 'image' %}
-      <label class="compact">сек
-        <input type="number" name="display_seconds" value="{{ p.display_seconds }}" min="1" max="3600" class="narrow">
-      </label>
-      {% else %}
-      <input type="hidden" name="display_seconds" value="{{ p.display_seconds }}">
-      {% endif %}
-      <label class="compact">с
-        <input type="datetime-local" name="starts_at"
-               value="{{ p.starts_at.strftime('%Y-%m-%dT%H:%M') if p.starts_at }}">
-      </label>
-      <label class="compact">до
-        <input type="datetime-local" name="expires_at"
-               value="{{ p.expires_at.strftime('%Y-%m-%dT%H:%M') if p.expires_at }}">
-      </label>
-      <span class="inline-form">
-        <label class="compact">окно
-          <input type="time" name="daily_from" value="{{ p.daily_from or '' }}">
-        </label>
-        <label class="compact">–
-          <input type="time" name="daily_until" value="{{ p.daily_until or '' }}">
-        </label>
-        {% for d in WEEKDAY_NAMES %}
-        <label class="compact">
-          <input type="checkbox" name="wd" value="{{ loop.index0 }}"
-                 {{ 'checked' if p.weekdays_mask and (p.weekdays_mask // (2 ** loop.index0)) % 2 }}> {{ d }}
-        </label>
-        {% endfor %}
-      </span>
-      <button type="submit" class="btn">Сохранить</button>
-    </form>
-  </div>
-  <div class="poster-actions">
-    <form method="post" action="/posters/{{ p.id }}/toggle">
-      <button type="submit" class="btn">{{ 'Выключить' if p.enabled else 'Включить' }}</button>
-    </form>
-    <form method="post" action="/posters/{{ p.id }}/delete"
-          onsubmit="return confirm('Удалить афишу «{{ p.name }}»?')">
-      <button type="submit" class="btn danger">Удалить</button>
-    </form>
-  </div>
+<div class="topbar">
+  <h1>Афиши</h1>
+  <div class="right"><a class="btn primary" href="/publish">＋ Опубликовать</a></div>
 </div>
-{% else %}
-<p class="muted">Афиш пока нет — загрузите первую.</p>
-{% endfor %}
+
+<div class="filters">
+  <a class="chip {{ 'acc' if filter == 'all' else 'mut' }}" href="/posters">Все · {{ counts['all'] }}</a>
+  <a class="chip {{ 'acc' if filter == 'active' else 'mut' }}" href="/posters?f=active">Активные · {{ counts['active'] }}</a>
+  <a class="chip {{ 'acc' if filter == 'expiring' else 'warn' }}" href="/posters?f=expiring">Истекают · {{ counts['expiring'] }}</a>
+  <a class="chip {{ 'acc' if filter == 'disabled' else 'mut' }}" href="/posters?f=disabled">Выключенные · {{ counts['disabled'] }}</a>
+</div>
+
+<div class="posters-grid">
+  {% for p in posters %}
+  {% set label, cls = POSTER_STATUS[p.status] %}
+  <a class="poster-card" href="/posters/{{ p.id }}">
+    <div class="pv"><img src="/thumbs/{{ p.media.sha256 }}.jpg" alt=""
+         onerror="this.style.visibility='hidden'"></div>
+    <div class="pb">
+      <b>{{ p.name }}</b>
+      <div class="chips">
+        <span class="chip {{ cls }}">{{ label }}</span>
+        {% if p.media.kind == 'video' %}<span class="chip mut">видео {{ p.media.duration_sec|duration }}</span>{% endif %}
+        {% if p.media.transcode_status in TRANSCODE_STATUS %}
+          {% set tlabel, tcls = TRANSCODE_STATUS[p.media.transcode_status] %}
+          <span class="chip {{ tcls }}">⚙ {{ tlabel }}</span>
+        {% endif %}
+      </div>
+      <div class="meta">
+        {{ target_summary(p) }}<br>
+        {% if p.expires_at %}до {{ p.expires_at|dt }}{% else %}бессрочно{% endif %}
+        {% set sched = p|schedule %}{% if sched %} · {{ sched }}{% endif %}
+      </div>
+    </div>
+  </a>
+  {% else %}
+  <p class="muted">Здесь пусто. <a href="/publish">Опубликуйте первую афишу</a>.</p>
+  {% endfor %}
+</div>
 {% endblock %}

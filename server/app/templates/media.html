@@ -1,9 +1,10 @@
 {% extends "base.html" %}
-{% block title %}Медиатека — RPi Signage{% endblock %}
+{% block title %}Медиатека — Signage{% endblock %}
 {% block content %}
-<h1>Медиатека</h1>
-<p class="muted">Все загруженные файлы. Файлы загружаются на странице
-  <a href="/posters">Афиши</a>; один файл может использоваться несколькими афишами.</p>
+<div class="topbar">
+  <h1>Медиатека</h1>
+  <span class="sub">исходные файлы всех афиш</span>
+</div>
 
 <table class="table">
   <tr>
@@ -22,9 +23,9 @@
       {% if f.kind == 'video' %}· {{ f.video_codec }} · {{ f.duration_sec|duration }}{% endif %}
       {% if f.transcode_status in TRANSCODE_STATUS %}
         {% set tlabel, tcls = TRANSCODE_STATUS[f.transcode_status] %}
-        <br><span class="badge {{ tcls }}">⚙ {{ tlabel }}</span>
+        <br><span class="chip {{ tcls }}">⚙ {{ tlabel }}</span>
       {% endif %}
-      {% if f.compat_warning %}<br><span class="badge warn">⚠ {{ f.compat_warning }}</span>{% endif %}
+      {% if f.compat_warning %}<br><span class="chip warn">⚠ {{ f.compat_warning }}</span>{% endif %}
     </td>
     <td>{{ f.posters|length }}</td>
     <td class="small">{{ f.created_at|dt }}</td>

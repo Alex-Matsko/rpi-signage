@@ -3,32 +3,38 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{% block title %}RPi Signage{% endblock %}</title>
+<title>{% block title %}Signage{% endblock %}</title>
 <link rel="stylesheet" href="/static/app.css">
 </head>
 <body>
-<header>
-  <nav>
-    <span class="brand">📺 Signage</span>
+<div class="app">
+  <nav class="side">
+    <a class="brand" href="/">📺 Signage<small>афиши для касс</small></a>
     {% set path = request.url.path %}
-    <a href="/" class="{{ 'active' if path == '/' }}">Дашборд</a>
-    <a href="/posters" class="{{ 'active' if path.startswith('/posters') }}">Афиши</a>
-    <a href="/playlists" class="{{ 'active' if path.startswith('/playlists') }}">Плейлисты</a>
-    <a href="/devices" class="{{ 'active' if path.startswith('/devices') }}">Экраны</a>
-    <a href="/groups" class="{{ 'active' if path.startswith('/groups') }}">Группы</a>
-    <a href="/media" class="{{ 'active' if path.startswith('/media') }}">Медиатека</a>
-    <a href="/users" class="{{ 'active' if path.startswith('/users') }}">Пользователи</a>
-    <span class="spacer"></span>
-    <span class="muted">{{ user.username }}</span>
-    <a href="/logout">Выйти</a>
+    <a class="nav-item nav-publish" href="/publish"><span class="ico">＋</span> Опубликовать</a>
+    <a class="nav-item {{ 'active' if path == '/' }}" href="/"><span class="ico">◧</span> Дашборд</a>
+    <a class="nav-item {{ 'active' if path.startswith('/posters') }}" href="/posters"><span class="ico">▤</span> Афиши</a>
+    <a class="nav-item {{ 'active' if path.startswith('/screens') }}" href="/screens"><span class="ico">▦</span> Экраны</a>
+    {% if user.is_admin %}
+    <a class="nav-item {{ 'active' if path.startswith('/media') }}" href="/media"><span class="ico">▣</span> Медиатека</a>
+    <a class="nav-item {{ 'active' if path.startswith('/users') }}" href="/users"><span class="ico">◔</span> Пользователи</a>
+    {% endif %}
+    <div class="spacer"></div>
+    <div class="user-chip">
+      <div class="avatar">{{ user.username[:2]|upper }}</div>
+      <div class="who">{{ user.username }}
+        <small>{{ 'администратор' if user.is_admin else ('менеджер · ' + user.city.name if user.city else 'менеджер') }}
+          · <a href="/logout">выйти</a></small>
+      </div>
+    </div>
   </nav>
-</header>
-<main>
-  {% set msg = request.query_params.get('msg') %}
-  {% set err = request.query_params.get('err') %}
-  {% if msg %}<div class="flash ok">{{ msg }}</div>{% endif %}
-  {% if err %}<div class="flash err">{{ err }}</div>{% endif %}
-  {% block content %}{% endblock %}
-</main>
+  <main>
+    {% set msg = request.query_params.get('msg') %}
+    {% set err = request.query_params.get('err') %}
+    {% if msg %}<div class="flash ok">{{ msg }}</div>{% endif %}
+    {% if err %}<div class="flash err">{{ err }}</div>{% endif %}
+    {% block content %}{% endblock %}
+  </main>
+</div>
 </body>
 </html>

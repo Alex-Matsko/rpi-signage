@@ -12,10 +12,12 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
+from sqlalchemy import or_
+
 from .. import config, media, security
 from ..db import get_db
 from ..deps import current_device
-from ..models import Device, MediaFile, Playlist, now
+from ..models import Device, MediaFile, Poster, PosterTarget, now
 
 router = APIRouter(prefix="/api/agent")
 
@@ -37,41 +39,53 @@ def bundled_agent_version() -> str | None:
         return None
 
 
-def build_manifest(device: Device) -> dict:
-    """Собирает манифест устройства: элементы действующего плейлиста.
+def device_posters(device: Device, db: Session) -> list[Poster]:
+    """Афиши, назначенные экрану: напрямую или через его город."""
+    conditions = [PosterTarget.device_id == device.id]
+    if device.city_id is not None:
+        conditions.append(PosterTarget.city_id == device.city_id)
+    return (
+        db.query(Poster)
+        .join(PosterTarget)
+        .filter(or_(*conditions))
+        .order_by(Poster.sort_order, Poster.created_at, Poster.id)
+        .distinct()
+        .all()
+    )
+
+
+def build_manifest(device: Device, db: Session) -> dict:
+    """Собирает манифест устройства: афиши его города и назначенные лично.
 
     Истекшие афиши исключаются; будущие (starts_at впереди) включаются,
     чтобы агент начал их показывать вовремя даже без связи с сервером.
     """
     items = []
-    playlist: Playlist | None = device.effective_playlist
-    if playlist is not None:
-        t = now()
-        for item in playlist.items:
-            poster = item.poster
-            if not poster.enabled:
-                continue
-            if poster.expires_at and poster.expires_at <= t:
-                continue
-            m = poster.media
-            items.append({
-                "poster_id": poster.id,
-                "name": poster.name,
-                "kind": m.kind,
-                "mime": m.mime,
-                "sha256": m.sha256,
-                "size": m.size_bytes,
-                "url": f"/api/agent/media/{m.sha256}",
-                "duration": (
-                    poster.display_seconds if m.kind == "image"
-                    else m.duration_sec
-                ),
-                "starts_at": poster.starts_at.isoformat() if poster.starts_at else None,
-                "expires_at": poster.expires_at.isoformat() if poster.expires_at else None,
-                "daily_from": poster.daily_from or None,
-                "daily_until": poster.daily_until or None,
-                "weekdays": poster.weekdays_mask or None,
-            })
+    t = now()
+    for poster in device_posters(device, db):
+        if not poster.enabled:
+            continue
+        if poster.expires_at and poster.expires_at <= t:
+            continue
+        m = poster.media
+        items.append({
+            "poster_id": poster.id,
+            "name": poster.name,
+            "kind": m.kind,
+            "mime": m.mime,
+            "sha256": m.sha256,
+            "size": m.size_bytes,
+            "url": f"/api/agent/media/{m.sha256}",
+            "duration": (
+                poster.display_seconds if m.kind == "image"
+                else m.duration_sec
+            ),
+            "starts_at": poster.starts_at.isoformat() if poster.starts_at else None,
+            "expires_at": poster.expires_at.isoformat() if poster.expires_at else None,
+            "daily_from": poster.daily_from or None,
+            "daily_until": poster.daily_until or None,
+            "weekdays": poster.weekdays_mask or None,
+        })
     version = hashlib.sha256(
         json.dumps(items, sort_keys=True, ensure_ascii=False).encode()
     ).hexdigest()[:16]
@@ -107,8 +121,11 @@ def register(payload: RegisterIn, db: Session = Depends(get_db)):
 
 
 @router.get("/manifest")
-def manifest(device: Device = Depends(current_device)):
-    return build_manifest(device)
+def manifest(
+    device: Device = Depends(current_device),
+    db: Session = Depends(get_db),
+):
+    return build_manifest(device, db)
 
 
 @router.get("/media/{sha256}")
@@ -165,4 +182,7 @@ def status(
     db.commit()
     # Версия манифеста в ответе позволяет агенту заметить изменения раньше
     # планового опроса.
-    return {"ok": True, "manifest_version": build_manifest(device)["manifest_version"]}
+    return {
+        "ok": True,
+        "manifest_version": build_manifest(device, db)["manifest_version"],
+    }

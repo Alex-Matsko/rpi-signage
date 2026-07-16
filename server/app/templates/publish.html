@@ -1,0 +1,133 @@
+{% extends "base.html" %}
+{% block title %}Публикация — Signage{% endblock %}
+{% block content %}
+<div class="topbar">
+  <h1>Публикация афиш</h1>
+  <span class="sub">файлы, расписание и города — в одном шаге</span>
+</div>
+
+<form method="post" action="/publish" enctype="multipart/form-data">
+  <div class="wizard">
+    <div class="panel">
+      <div class="p-head"><span class="step-n">1</span><h3>Файлы</h3></div>
+      <div class="p-body">
+        <label class="dropzone" id="dz">
+          <b>Перетащите файлы сюда</b>
+          или нажмите, чтобы выбрать — JPEG, PNG, MP4, сразу несколько
+          <input type="file" name="files" id="files" multiple required
+                 accept="image/jpeg,image/png,video/mp4">
+        </label>
+        <div class="file-list" id="flist"></div>
+        <p class="note">Название афиши берётся из имени файла (можно изменить
+          после публикации). Несовместимое видео перекодируется автоматически.</p>
+      </div>
+    </div>
+
+    <div>
+      <div class="panel">
+        <div class="p-head"><span class="step-n">2</span><h3>Когда показывать</h3></div>
+        <div class="p-body">
+          <div class="fgrid">
+            <label>Начало показа<input type="datetime-local" name="starts_at"></label>
+            <label>Истекает<input type="datetime-local" name="expires_at"></label>
+            <label>Ежедневно с<input type="time" name="daily_from"></label>
+            <label>до<input type="time" name="daily_until"></label>
+            <label>Показ изображения, сек
+              <input type="number" name="display_seconds" value="10" min="1" max="3600"></label>
+          </div>
+          <span class="flabel" style="margin-top:12px">Дни недели (пусто = все)</span>
+          <div class="days">
+            {% for d in WEEKDAY_NAMES %}
+            <label class="day"><input type="checkbox" name="wd" value="{{ loop.index0 }}"><span>{{ d }}</span></label>
+            {% endfor %}
+          </div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="p-head"><span class="step-n">3</span><h3>Где показывать</h3></div>
+        <div class="p-body">
+          {% for c in cities %}
+          <details class="dest" {{ 'open' if cities|length == 1 }}>
+            <summary>
+              <input type="checkbox" name="city" value="{{ c.id }}"
+                     onclick="event.stopPropagation()">
+              <b>{{ c.name }}</b><small>{{ c.devices|length }} экр. · галочка = весь город, включая будущие экраны</small>
+            </summary>
+            <div class="list">
+              {% for d in devices_by_city[c.id] %}
+              <label><input type="checkbox" name="device" value="{{ d.id }}"> {{ d.name }}</label>
+              {% else %}
+              <span class="muted small">Экранов нет</span>
+              {% endfor %}
+            </div>
+          </details>
+          {% else %}
+          <p class="muted">Городов пока нет — <a href="/screens">создайте город и экран</a>.</p>
+          {% endfor %}
+          <p class="note">Отметьте город целиком или разверните и выберите
+            отдельные экраны.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="publish-cta">
+    <span class="muted" id="summary">Выберите файлы и хотя бы один город или экран</span>
+    <button type="submit" class="btn primary big">Опубликовать</button>
+  </div>
+</form>
+
+<script>
+  const input = document.getElementById('files');
+  const dz = document.getElementById('dz');
+  const flist = document.getElementById('flist');
+  const summary = document.getElementById('summary');
+
+  function fmtSize(n) {
+    if (n > 1048576) return (n / 1048576).toFixed(1) + ' МБ';
+    return Math.round(n / 1024) + ' КБ';
+  }
+  function renderFiles() {
+    flist.innerHTML = '';
+    for (const f of input.files) {
+      const row = document.createElement('div');
+      row.className = 'file-row';
+      const name = document.createElement('span');
+      name.className = 'fname';
+      name.textContent = f.name;
+      const size = document.createElement('small');
+      size.textContent = fmtSize(f.size);
+      row.append(name, size);
+      flist.append(row);
+    }
+    updateSummary();
+  }
+  function updateSummary() {
+    const nf = input.files.length;
+    const cities = document.querySelectorAll('input[name=city]:checked').length;
+    const devs = document.querySelectorAll('input[name=device]:checked').length;
+    const parts = [];
+    if (nf) parts.push(nf + ' файл(ов)');
+    if (cities) parts.push(cities + ' гор. целиком');
+    if (devs) parts.push(devs + ' отдельных экранов');
+    summary.textContent = parts.length >= 2 || (nf && (cities || devs))
+      ? parts.join(' · ')
+      : 'Выберите файлы и хотя бы один город или экран';
+  }
+  input.addEventListener('change', renderFiles);
+  document.querySelectorAll('input[name=city], input[name=device]')
+    .forEach(cb => cb.addEventListener('change', updateSummary));
+
+  ['dragover', 'dragenter'].forEach(ev => dz.addEventListener(ev, e => {
+    e.preventDefault(); dz.classList.add('drag');
+  }));
+  ['dragleave', 'drop'].forEach(ev => dz.addEventListener(ev, e => {
+    e.preventDefault(); dz.classList.remove('drag');
+  }));
+  dz.addEventListener('drop', e => {
+    input.files = e.dataTransfer.files;
+    renderFiles();
+  });
+</script>
+{% endblock %}

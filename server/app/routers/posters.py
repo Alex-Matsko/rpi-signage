@@ -1,109 +1,107 @@
-import re
+"""Афиши: карточки со статусами, страница афиши, назначения на города/экраны."""
+from datetime import timedelta
 
-from fastapi import APIRouter, Depends, Form, Request, UploadFile
+from fastapi import APIRouter, Depends, Form, Request
 from sqlalchemy.orm import Session
 
-from .. import media, worker
+from .. import config
 from ..db import get_db
-from ..deps import current_user
-from ..models import MediaFile, Playlist, Poster, User
+from ..deps import check_city_access, current_user, visible_cities
+from ..models import Device, Poster, PosterTarget, User, now
+from ..routers.publish import parse_daily, weekdays_mask
 from ..templating import templates
 from ..utils import parse_dt_local, redirect
 
 router = APIRouter(prefix="/posters")
 
 
-def _parse_daily(value: str) -> str | None:
-    """Проверяет время 'HH:MM' из input type=time ('' -> None)."""
-    value = value.strip()
-    if not value:
-        return None
-    if not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", value):
-        return None
-    return value
+def visible_posters(user: User, db: Session) -> list[Poster]:
+    """Менеджер видит афиши, касающиеся его города (или созданные им)."""
+    posters = (
+        db.query(Poster).order_by(Poster.created_at.desc()).all()
+    )
+    if user.is_admin:
+        return posters
+    result = []
+    for p in posters:
+        if p.created_by == user.id:
+            result.append(p)
+            continue
+        for t in p.targets:
+            if t.city_id == user.city_id or (
+                t.device is not None and t.device.city_id == user.city_id
+            ):
+                result.append(p)
+                break
+    return result
 
 
-def _weekdays_mask(wd: list[int]) -> int | None:
-    mask = 0
-    for day in wd:
-        if 0 <= day <= 6:
-            mask |= 1 << day
-    return mask if 0 < mask < 127 else None  # все 7 дней = без ограничения
+def target_summary(poster: Poster) -> str:
+    parts = [t.city.name for t in poster.targets if t.city is not None]
+    n_devices = sum(1 for t in poster.targets if t.device_id is not None)
+    if n_devices:
+        parts.append(f"экраны: {n_devices}")
+    return ", ".join(parts) if parts else "не назначена"
 
 
 @router.get("")
 def posters_page(
     request: Request,
+    f: str = "all",
     user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ):
-    posters = db.query(Poster).order_by(Poster.created_at.desc()).all()
-    playlists = db.query(Playlist).order_by(Playlist.name).all()
+    posters = visible_posters(user, db)
+    horizon = now() + timedelta(days=config.EXPIRY_WARN_DAYS)
+    counts = {
+        "all": len(posters),
+        "active": sum(1 for p in posters if p.status == "active"),
+        "expiring": sum(
+            1 for p in posters
+            if p.enabled and p.expires_at and now() < p.expires_at <= horizon
+        ),
+        "disabled": sum(1 for p in posters if p.status == "disabled"),
+    }
+    if f == "active":
+        posters = [p for p in posters if p.status == "active"]
+    elif f == "expiring":
+        posters = [
+            p for p in posters
+            if p.enabled and p.expires_at and now() < p.expires_at <= horizon
+        ]
+    elif f == "disabled":
+        posters = [p for p in posters if p.status == "disabled"]
     return templates.TemplateResponse(request, "posters.html", {
         "user": user,
         "posters": posters,
-        "playlists": playlists,
+        "filter": f,
+        "counts": counts,
+        "target_summary": target_summary,
     })
 
 
-@router.post("/upload")
-def upload_poster(
-    file: UploadFile,
-    name: str = Form(""),
-    display_seconds: int = Form(10),
-    starts_at: str = Form(""),
-    expires_at: str = Form(""),
-    daily_from: str = Form(""),
-    daily_until: str = Form(""),
-    wd: list[int] = Form([]),
-    playlist_id: int = Form(0),
+@router.get("/{poster_id}")
+def poster_page(
+    poster_id: int,
+    request: Request,
     user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ):
-    try:
-        attrs = media.save_upload(file)
-    except media.MediaError as e:
-        return redirect("/posters", err=str(e))
-
-    mf = db.query(MediaFile).filter(MediaFile.sha256 == attrs["sha256"]).first()
-    if mf is None:
-        mf = MediaFile(**attrs)
-        if mf.kind == "video" and not mf.compatible:
-            mf.transcode_status = "pending"
-        db.add(mf)
-        db.flush()
-
-    poster = Poster(
-        name=name.strip() or (file.filename or "Афиша"),
-        media_id=mf.id,
-        display_seconds=max(1, display_seconds),
-        starts_at=parse_dt_local(starts_at),
-        expires_at=parse_dt_local(expires_at),
-        daily_from=_parse_daily(daily_from),
-        daily_until=_parse_daily(daily_until),
-        weekdays_mask=_weekdays_mask(wd),
-        enabled=True,
-    )
-    db.add(poster)
-    db.flush()
-
-    msg = f"Афиша «{poster.name}» загружена."
-    if mf.transcode_status == "pending":
-        msg += " Видео поставлено в очередь на транскодирование."
-    if playlist_id:
-        playlist = db.get(Playlist, playlist_id)
-        if playlist is not None:
-            from ..models import PlaylistItem
-            playlist.items.append(PlaylistItem(poster_id=poster.id,
-                                               position=len(playlist.items)))
-            msg += f" Добавлена в плейлист «{playlist.name}»."
-    db.commit()
-
-    if mf.transcode_status == "pending":
-        worker.enqueue(mf.id)
-    if mf.compat_warning:
-        return redirect("/posters", msg=msg, err=mf.compat_warning)
-    return redirect("/posters", msg=msg)
+    poster = db.get(Poster, poster_id)
+    if poster is None:
+        return redirect("/posters", err="Афиша не найдена.")
+    cities = visible_cities(user, db)
+    devices_by_city = {
+        c.id: sorted(c.devices, key=lambda d: d.name) for c in cities
+    }
+    return templates.TemplateResponse(request, "poster_detail.html", {
+        "user": user,
+        "p": poster,
+        "cities": cities,
+        "devices_by_city": devices_by_city,
+        "target_city_ids": {t.city_id for t in poster.targets if t.city_id},
+        "target_device_ids": {t.device_id for t in poster.targets if t.device_id},
+    })
 
 
 @router.post("/{poster_id}/update")
@@ -116,6 +114,8 @@ def update_poster(
     daily_from: str = Form(""),
     daily_until: str = Form(""),
     wd: list[int] = Form([]),
+    city: list[int] = Form([]),
+    device: list[int] = Form([]),
     user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ):
@@ -126,11 +126,34 @@ def update_poster(
     poster.display_seconds = max(1, display_seconds)
     poster.starts_at = parse_dt_local(starts_at)
     poster.expires_at = parse_dt_local(expires_at)
-    poster.daily_from = _parse_daily(daily_from)
-    poster.daily_until = _parse_daily(daily_until)
-    poster.weekdays_mask = _weekdays_mask(wd)
+    poster.daily_from = parse_daily(daily_from)
+    poster.daily_until = parse_daily(daily_until)
+    poster.weekdays_mask = weekdays_mask(wd)
+
+    # Назначения: менеджер меняет только в пределах своего города
+    allowed = {c.id for c in visible_cities(user, db)}
+    new_cities = {c for c in city if c in allowed}
+    new_devices = {
+        d.id for d in db.query(Device).filter(Device.id.in_(device or [])).all()
+        if d.city_id in allowed
+    }
+    for t in list(poster.targets):
+        if t.city_id is not None:
+            if t.city_id in allowed and t.city_id not in new_cities:
+                poster.targets.remove(t)
+            new_cities.discard(t.city_id)
+        elif t.device_id is not None:
+            in_scope = t.device is not None and t.device.city_id in allowed
+            if in_scope and t.device_id not in new_devices:
+                poster.targets.remove(t)
+            new_devices.discard(t.device_id)
+    for cid in new_cities:
+        poster.targets.append(PosterTarget(city_id=cid))
+    for did in new_devices:
+        poster.targets.append(PosterTarget(device_id=did))
+
     db.commit()
-    return redirect("/posters", msg=f"Афиша «{poster.name}» обновлена.")
+    return redirect(f"/posters/{poster_id}", msg="Афиша сохранена.")
 
 
 @router.post("/{poster_id}/toggle")
@@ -145,7 +168,7 @@ def toggle_poster(
     poster.enabled = not poster.enabled
     db.commit()
     state = "включена" if poster.enabled else "выключена"
-    return redirect("/posters", msg=f"Афиша «{poster.name}» {state}.")
+    return redirect(f"/posters/{poster_id}", msg=f"Афиша {state}.")
 
 
 @router.post("/{poster_id}/delete")
@@ -157,6 +180,8 @@ def delete_poster(
     poster = db.get(Poster, poster_id)
     if poster is None:
         return redirect("/posters", err="Афиша не найдена.")
+    if not user.is_admin and poster.created_by != user.id:
+        check_city_access(user, None)  # 403
     name = poster.name
     db.delete(poster)
     db.commit()

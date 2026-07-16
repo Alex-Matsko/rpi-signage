@@ -1,4 +1,10 @@
-"""Модели данных. Все даты/время — наивные, в часовом поясе сервера (TZ)."""
+"""Модели данных. Все даты/время — наивные, в часовом поясе сервера (TZ).
+
+С v0.3 структура строится вокруг городов: экраны (кассы) принадлежат городу,
+афиши назначаются напрямую на города и/или отдельные экраны (PosterTarget),
+плейлисты как сущность убраны. Пользователи: администраторы (всё) и
+менеджеры города (только свой город).
+"""
 from datetime import datetime
 
 from sqlalchemy import DateTime, Float, ForeignKey, Integer, String, Boolean, Text
@@ -11,13 +17,38 @@ def now() -> datetime:
     return datetime.now().replace(microsecond=0)
 
 
+ROLE_ADMIN = "admin"
+ROLE_MANAGER = "manager"
+
+
+class City(Base):
+    __tablename__ = "cities"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(255), unique=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+
+    devices: Mapped[list["Device"]] = relationship(back_populates="city")
+
+
 class User(Base):
     __tablename__ = "users"
 
     id: Mapped[int] = mapped_column(primary_key=True)
     username: Mapped[str] = mapped_column(String(64), unique=True)
     password_hash: Mapped[str] = mapped_column(String(256))
+    role: Mapped[str] = mapped_column(String(16), default=ROLE_ADMIN,
+                                      server_default=ROLE_ADMIN)
+    # Для менеджера — его город; у администратора NULL
+    city_id: Mapped[int | None] = mapped_column(ForeignKey("cities.id"),
+                                                nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+
+    city: Mapped[City | None] = relationship()
+
+    @property
+    def is_admin(self) -> bool:
+        return self.role == ROLE_ADMIN
 
 
 class MediaFile(Base):
@@ -59,10 +90,15 @@ class Poster(Base):
     # Битовая маска дней недели (бит 0 = понедельник); NULL/0 = все дни
     weekdays_mask: Mapped[int | None] = mapped_column(Integer, nullable=True)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    # Порядок в ротации экрана (меньше — раньше)
+    sort_order: Mapped[int] = mapped_column(Integer, default=0,
+                                            server_default="0")
+    created_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"),
+                                                   nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
 
     media: Mapped[MediaFile] = relationship(back_populates="posters")
-    playlist_items: Mapped[list["PlaylistItem"]] = relationship(
+    targets: Mapped[list["PosterTarget"]] = relationship(
         back_populates="poster", cascade="all, delete-orphan"
     )
 
@@ -78,44 +114,27 @@ class Poster(Base):
             return "scheduled"
         return "active"
 
-
-class Playlist(Base):
-    __tablename__ = "playlists"
-
-    id: Mapped[int] = mapped_column(primary_key=True)
-    name: Mapped[str] = mapped_column(String(255), unique=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
-
-    items: Mapped[list["PlaylistItem"]] = relationship(
-        back_populates="playlist",
-        cascade="all, delete-orphan",
-        order_by="PlaylistItem.position",
-    )
+    def targets_city(self, city_id: int | None) -> bool:
+        return any(t.city_id == city_id for t in self.targets if t.city_id)
 
 
-class PlaylistItem(Base):
-    __tablename__ = "playlist_items"
+class PosterTarget(Base):
+    """Назначение афиши: на город (все его экраны, включая будущие)
+    или на конкретный экран."""
+
+    __tablename__ = "poster_targets"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    playlist_id: Mapped[int] = mapped_column(ForeignKey("playlists.id"))
-    poster_id: Mapped[int] = mapped_column(ForeignKey("posters.id"))
-    position: Mapped[int] = mapped_column(Integer, default=0)
+    poster_id: Mapped[int] = mapped_column(ForeignKey("posters.id"),
+                                           index=True)
+    city_id: Mapped[int | None] = mapped_column(ForeignKey("cities.id"),
+                                                nullable=True, index=True)
+    device_id: Mapped[int | None] = mapped_column(ForeignKey("devices.id"),
+                                                  nullable=True, index=True)
 
-    playlist: Mapped[Playlist] = relationship(back_populates="items")
-    poster: Mapped[Poster] = relationship(back_populates="playlist_items")
-
-
-class DeviceGroup(Base):
-    __tablename__ = "device_groups"
-
-    id: Mapped[int] = mapped_column(primary_key=True)
-    name: Mapped[str] = mapped_column(String(255), unique=True)
-    playlist_id: Mapped[int | None] = mapped_column(
-        ForeignKey("playlists.id"), nullable=True
-    )
-
-    playlist: Mapped[Playlist | None] = relationship()
-    devices: Mapped[list["Device"]] = relationship(back_populates="group")
+    poster: Mapped[Poster] = relationship(back_populates="targets")
+    city: Mapped[City | None] = relationship()
+    device: Mapped["Device"] = relationship()
 
 
 class Device(Base):
@@ -123,12 +142,8 @@ class Device(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(String(255))
-    group_id: Mapped[int | None] = mapped_column(
-        ForeignKey("device_groups.id"), nullable=True
-    )
-    playlist_id: Mapped[int | None] = mapped_column(
-        ForeignKey("playlists.id"), nullable=True
-    )
+    city_id: Mapped[int | None] = mapped_column(ForeignKey("cities.id"),
+                                                nullable=True)
     # Одноразовый код подключения; после регистрации агента обнуляется
     pairing_code: Mapped[str | None] = mapped_column(
         String(16), unique=True, nullable=True
@@ -148,17 +163,7 @@ class Device(Base):
     current_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
     current_since: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
-    group: Mapped[DeviceGroup | None] = relationship(back_populates="devices")
-    playlist: Mapped[Playlist | None] = relationship()
-
-    @property
-    def effective_playlist(self) -> Playlist | None:
-        """Плейлист устройства; если не задан — плейлист его группы."""
-        if self.playlist is not None:
-            return self.playlist
-        if self.group is not None:
-            return self.group.playlist
-        return None
+    city: Mapped[City | None] = relationship(back_populates="devices")
 
     def is_online(self, offline_after_sec: int) -> bool:
         if self.last_seen_at is None:

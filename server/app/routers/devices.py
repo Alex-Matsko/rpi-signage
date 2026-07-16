@@ -1,66 +1,69 @@
+"""Экраны (кассы), сгруппированные по городам, и управление городами."""
 from fastapi import APIRouter, Depends, Form, Request
 from sqlalchemy.orm import Session
 
 from .. import config, security
 from ..db import get_db
-from ..deps import current_user
-from ..models import Device, DeviceGroup, Playlist, User
-from ..routers.agent import build_manifest
+from ..deps import (
+    check_city_access, check_device_access, current_user, require_admin,
+    visible_cities,
+)
+from ..models import City, Device, PosterTarget, User
+from ..routers.agent import build_manifest, bundled_agent_version
 from ..templating import templates
 from ..utils import redirect
 
-router = APIRouter(prefix="/devices")
+router = APIRouter()
 
 
-def _common(db: Session) -> dict:
-    return {
-        "groups": db.query(DeviceGroup).order_by(DeviceGroup.name).all(),
-        "playlists": db.query(Playlist).order_by(Playlist.name).all(),
-        "offline_after": config.OFFLINE_AFTER_SEC,
-    }
-
-
-@router.get("")
-def devices_page(
+@router.get("/screens")
+def screens_page(
     request: Request,
     user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ):
-    devices = db.query(Device).order_by(Device.name).all()
-    return templates.TemplateResponse(request, "devices.html", {
+    cities = visible_cities(user, db)
+    orphans = (
+        db.query(Device).filter(Device.city_id.is_(None))
+        .order_by(Device.name).all()
+        if user.is_admin else []
+    )
+    return templates.TemplateResponse(request, "screens.html", {
         "user": user,
-        "devices": devices,
-        **_common(db),
+        "cities": cities,
+        "orphans": orphans,
     })
 
 
-@router.post("/create")
-def create_device(
+@router.post("/screens/create")
+def create_screen(
     name: str = Form(...),
-    group_id: int = Form(0),
-    playlist_id: int = Form(0),
+    city_id: int = Form(0),
     user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ):
     name = name.strip()
     if not name:
-        return redirect("/devices", err="Укажите название экрана.")
+        return redirect("/screens", err="Укажите название экрана.")
+    if not user.is_admin:
+        city_id = user.city_id or 0
+    if city_id and db.get(City, city_id) is None:
+        return redirect("/screens", err="Город не найден.")
     device = Device(
         name=name,
-        group_id=group_id or None,
-        playlist_id=playlist_id or None,
+        city_id=city_id or None,
         pairing_code=security.new_pairing_code(),
     )
     db.add(device)
     db.commit()
     return redirect(
-        f"/devices/{device.id}",
+        f"/screens/{device.id}",
         msg=f"Экран «{name}» создан. Код подключения: {device.pairing_code}",
     )
 
 
-@router.get("/{device_id}")
-def device_page(
+@router.get("/screens/{device_id}")
+def screen_page(
     device_id: int,
     request: Request,
     user: User = Depends(current_user),
@@ -68,38 +71,39 @@ def device_page(
 ):
     device = db.get(Device, device_id)
     if device is None:
-        return redirect("/devices", err="Экран не найден.")
-    from ..routers.agent import bundled_agent_version
-    return templates.TemplateResponse(request, "device_detail.html", {
+        return redirect("/screens", err="Экран не найден.")
+    check_device_access(user, device)
+    return templates.TemplateResponse(request, "screen_detail.html", {
         "user": user,
         "device": device,
-        "manifest": build_manifest(device),
+        "manifest": build_manifest(device, db),
+        "cities": visible_cities(user, db),
         "server_agent_version": bundled_agent_version(),
-        **_common(db),
+        "offline_after": config.OFFLINE_AFTER_SEC,
     })
 
 
-@router.post("/{device_id}/update")
-def update_device(
+@router.post("/screens/{device_id}/update")
+def update_screen(
     device_id: int,
     name: str = Form(...),
-    group_id: int = Form(0),
-    playlist_id: int = Form(0),
+    city_id: int = Form(0),
     user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ):
     device = db.get(Device, device_id)
     if device is None:
-        return redirect("/devices", err="Экран не найден.")
+        return redirect("/screens", err="Экран не найден.")
+    check_device_access(user, device)
     device.name = name.strip() or device.name
-    device.group_id = group_id or None
-    device.playlist_id = playlist_id or None
+    if user.is_admin:
+        device.city_id = city_id or None
     db.commit()
-    return redirect(f"/devices/{device_id}", msg="Настройки экрана сохранены.")
+    return redirect(f"/screens/{device_id}", msg="Настройки экрана сохранены.")
 
 
-@router.post("/{device_id}/repair")
-def repair_device(
+@router.post("/screens/{device_id}/repair")
+def repair_screen(
     device_id: int,
     user: User = Depends(current_user),
     db: Session = Depends(get_db),
@@ -107,27 +111,86 @@ def repair_device(
     """Выпускает новый код подключения; старый токен агента отзывается."""
     device = db.get(Device, device_id)
     if device is None:
-        return redirect("/devices", err="Экран не найден.")
+        return redirect("/screens", err="Экран не найден.")
+    check_device_access(user, device)
     device.pairing_code = security.new_pairing_code()
     device.token_hash = None
     db.commit()
     return redirect(
-        f"/devices/{device_id}",
+        f"/screens/{device_id}",
         msg=f"Новый код подключения: {device.pairing_code}. "
             "Старый токен агента отозван.",
     )
 
 
-@router.post("/{device_id}/delete")
-def delete_device(
+@router.post("/screens/{device_id}/delete")
+def delete_screen(
     device_id: int,
     user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ):
     device = db.get(Device, device_id)
     if device is None:
-        return redirect("/devices", err="Экран не найден.")
+        return redirect("/screens", err="Экран не найден.")
+    check_device_access(user, device)
+    db.query(PosterTarget).filter(
+        PosterTarget.device_id == device_id).delete()
     name = device.name
     db.delete(device)
     db.commit()
-    return redirect("/devices", msg=f"Экран «{name}» удалён.")
+    return redirect("/screens", msg=f"Экран «{name}» удалён.")
+
+
+# ---------------------------------------------------------------- города
+
+@router.post("/cities/create")
+def create_city(
+    name: str = Form(...),
+    user: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    name = name.strip()
+    if not name:
+        return redirect("/screens", err="Укажите название города.")
+    if db.query(City).filter(City.name == name).first():
+        return redirect("/screens", err=f"Город «{name}» уже есть.")
+    db.add(City(name=name))
+    db.commit()
+    return redirect("/screens", msg=f"Город «{name}» добавлен.")
+
+
+@router.post("/cities/{city_id}/rename")
+def rename_city(
+    city_id: int,
+    name: str = Form(...),
+    user: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    city = db.get(City, city_id)
+    if city is None:
+        return redirect("/screens", err="Город не найден.")
+    city.name = name.strip() or city.name
+    db.commit()
+    return redirect("/screens", msg="Город переименован.")
+
+
+@router.post("/cities/{city_id}/delete")
+def delete_city(
+    city_id: int,
+    user: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    city = db.get(City, city_id)
+    if city is None:
+        return redirect("/screens", err="Город не найден.")
+    if city.devices:
+        return redirect(
+            "/screens",
+            err=f"В городе «{city.name}» есть экраны — сначала перенесите их.",
+        )
+    db.query(PosterTarget).filter(PosterTarget.city_id == city_id).delete()
+    db.query(User).filter(User.city_id == city_id).update({"city_id": None})
+    name = city.name
+    db.delete(city)
+    db.commit()
+    return redirect("/screens", msg=f"Город «{name}» удалён.")

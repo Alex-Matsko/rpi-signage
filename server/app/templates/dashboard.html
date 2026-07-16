@@ -1,68 +1,86 @@
 {% extends "base.html" %}
-{% block title %}Дашборд — RPi Signage{% endblock %}
+{% block title %}Дашборд — Signage{% endblock %}
 {% block content %}
 <meta http-equiv="refresh" content="15">
-<h1>Дашборд</h1>
+<div class="topbar">
+  <h1>Дашборд</h1>
+  <span class="sub">{{ cities|length }} гор. · {{ devices|length }} экр.</span>
+  <div class="right"><a class="btn primary" href="/publish">＋ Опубликовать афиши</a></div>
+</div>
 
-{% if offline or expiring or incomplete %}
-<section class="warnings">
-  {% if offline %}
-  <div class="flash err">
-    Офлайн-экраны:
-    {% for d in offline %}<a href="/devices/{{ d.id }}">{{ d.name }}</a>{{ ", " if not loop.last }}{% endfor %}
+{% if offline %}
+<div class="flash err">⚠ Офлайн:
+  {% for d in offline %}<a href="/screens/{{ d.id }}">{{ d.name }}</a>{{ ", " if not loop.last }}{% endfor %}
+</div>
+{% endif %}
+{% if expiring %}
+<div class="flash warn">Истекают в ближайшие {{ warn_days }} дн.:
+  {% for p in expiring %}<a href="/posters/{{ p.id }}">{{ p.name }}</a> ({{ p.expires_at|dt }}){{ ", " if not loop.last }}{% endfor %}
+</div>
+{% endif %}
+
+<div class="stats">
+  <div class="stat"><b>{{ online_count }} / {{ devices|length }}</b><span>экранов online</span></div>
+  <div class="stat"><b>{{ active_posters }}</b><span>активных афиш</span></div>
+  <div class="stat {{ 'warned' if expiring }}"><b>{{ expiring|length }}</b><span>истекают за {{ warn_days }} дн.</span></div>
+  <div class="stat {{ 'alert' if offline }}"><b>{{ offline|length }}</b><span>экранов офлайн</span></div>
+</div>
+
+{% macro screen_card(d) %}
+{% set online = d.is_online(offline_after) %}
+<a class="screen-card" href="/screens/{{ d.id }}">
+  <div class="row1"><b>{{ d.name }}</b>
+    {% if d.token_hash is none and d.pairing_code %}
+      <span class="chip mut">код: {{ d.pairing_code }}</span>
+    {% elif online %}
+      <span class="chip ok"><span class="dot"></span>online</span>
+    {% else %}
+      <span class="chip err"><span class="dot"></span>offline</span>
+    {% endif %}
   </div>
-  {% endif %}
-  {% if expiring %}
-  <div class="flash warn">
-    Истекают в ближайшие {{ warn_days }} дн.:
-    {% for p in expiring %}<a href="/posters">{{ p.name }}</a> ({{ p.expires_at|dt }}){{ ", " if not loop.last }}{% endfor %}
+  <div class="now">
+    {% if d.current_name and online %}
+      {% if d.current_sha256 %}<img class="mini-thumb" src="/thumbs/{{ d.current_sha256 }}.jpg" alt="" onerror="this.style.visibility='hidden'">{% endif %}
+      <div class="t"><div>{{ d.current_name }}</div><small>с {{ d.current_since|dt }}</small></div>
+    {% elif d.token_hash is none %}
+      <div class="t"><div class="muted">Ждёт установки агента</div></div>
+    {% elif not online and d.cache_total %}
+      <div class="t"><div class="muted">Играет из кеша автономно</div></div>
+    {% else %}
+      <div class="t"><div class="muted">Нет данных о показе</div></div>
+    {% endif %}
   </div>
-  {% endif %}
-  {% if incomplete %}
-  <div class="flash warn">
-    Неполный кеш:
-    {% for d in incomplete %}<a href="/devices/{{ d.id }}">{{ d.name }}</a> ({{ d.cache_done or 0 }}/{{ d.cache_total }}){{ ", " if not loop.last }}{% endfor %}
+  <div class="foot">
+    {% if d.cache_total %}<span>кеш {{ d.cache_done or 0 }}/{{ d.cache_total }}</span>{% endif %}
+    {% if d.temp_c is not none %}<span>{{ '%.0f'|format(d.temp_c) }}°C</span>{% endif %}
+    {% if d.agent_version %}<span>агент {{ d.agent_version }}</span>{% endif %}
   </div>
+</a>
+{% endmacro %}
+
+{% for c in cities %}
+<section class="city">
+  {% set online_n = c.devices|selectattr('last_seen_at')|list|length %}
+  <div class="city-head"><h2>{{ c.name }}</h2>
+    <span class="meta">{{ c.devices|length }} экр.</span></div>
+  {% if c.devices %}
+  <div class="screens-grid">
+    {% for d in c.devices|sort(attribute='name') %}{{ screen_card(d) }}{% endfor %}
+  </div>
+  {% else %}
+  <p class="muted small">В городе пока нет экранов — <a href="/screens">добавьте</a>.</p>
   {% endif %}
 </section>
-{% endif %}
+{% else %}
+<p class="muted">Городов пока нет. <a href="/screens">Добавьте первый город и экран</a>.</p>
+{% endfor %}
 
-{% if not devices %}
-<p class="muted">Экранов пока нет. <a href="/devices">Добавьте первый экран</a>.</p>
+{% if orphans %}
+<section class="city">
+  <div class="city-head"><h2 class="muted">Без города</h2></div>
+  <div class="screens-grid">
+    {% for d in orphans %}{{ screen_card(d) }}{% endfor %}
+  </div>
+</section>
 {% endif %}
-
-<div class="cards">
-  {% for d in devices %}
-  {% set online = d.is_online(offline_after) %}
-  <a class="card device-card" href="/devices/{{ d.id }}">
-    <div class="card-head">
-      <strong>{{ d.name }}</strong>
-      {% if d.token_hash is none and d.pairing_code %}
-        <span class="badge muted">не подключён</span>
-      {% elif online %}
-        <span class="badge ok">online</span>
-      {% else %}
-        <span class="badge err">offline</span>
-      {% endif %}
-    </div>
-    <div class="card-body">
-      {% if d.current_name and online %}
-        {% if d.current_sha256 %}<img class="mini-thumb" src="/thumbs/{{ d.current_sha256 }}.jpg" alt="">{% endif %}
-        <div>
-          <div class="label">Сейчас показывает</div>
-          <div>{{ d.current_name }}</div>
-          <div class="muted small">с {{ d.current_since|dt }}</div>
-        </div>
-      {% else %}
-        <div class="muted">Нет данных о показе</div>
-      {% endif %}
-    </div>
-    <div class="card-foot muted small">
-      {% if d.cache_total %}Кеш {{ d.cache_done or 0 }}/{{ d.cache_total }} ·{% endif %}
-      {% if d.temp_c is not none %}{{ '%.0f'|format(d.temp_c) }}°C ·{% endif %}
-      {{ d.effective_playlist.name if d.effective_playlist else 'плейлист не назначен' }}
-    </div>
-  </a>
-  {% endfor %}
-</div>
 {% endblock %}

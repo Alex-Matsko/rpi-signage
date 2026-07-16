@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session
 
 from .. import media, worker
 from ..db import get_db
-from ..deps import current_user
+from ..deps import current_user, require_admin
 from ..models import MediaFile, User
 from ..templating import templates
 from ..utils import redirect
@@ -15,7 +15,7 @@ router = APIRouter()
 @router.post("/media/{media_id}/transcode")
 def retry_transcode(
     media_id: int,
-    user: User = Depends(current_user),
+    user: User = Depends(require_admin),
     db: Session = Depends(get_db),
 ):
     """Повторная постановка несовместимого видео в очередь транскодирования."""
@@ -33,7 +33,7 @@ def retry_transcode(
 @router.get("/media")
 def media_page(
     request: Request,
-    user: User = Depends(current_user),
+    user: User = Depends(require_admin),
     db: Session = Depends(get_db),
 ):
     files = db.query(MediaFile).order_by(MediaFile.created_at.desc()).all()
@@ -46,7 +46,7 @@ def media_page(
 @router.post("/media/{media_id}/delete")
 def delete_media(
     media_id: int,
-    user: User = Depends(current_user),
+    user: User = Depends(require_admin),
     db: Session = Depends(get_db),
 ):
     mf = db.get(MediaFile, media_id)

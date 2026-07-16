@@ -3,12 +3,12 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Вход — RPi Signage</title>
+<title>Вход — Signage</title>
 <link rel="stylesheet" href="/static/app.css">
 </head>
 <body class="login-page">
 <div class="login-box">
-  <h1>📺 RPi Signage</h1>
+  <h1>📺 Signage</h1>
   {% if error %}<div class="flash err">{{ error }}</div>{% endif %}
   <form method="post" action="/login">
     <label>Логин
@@ -17,7 +17,7 @@
     <label>Пароль
       <input type="password" name="password" required autocomplete="current-password">
     </label>
-    <button type="submit" class="btn primary wide">Войти</button>
+    <button type="submit" class="btn primary big">Войти</button>
   </form>
 </div>
 </body>

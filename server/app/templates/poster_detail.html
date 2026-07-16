@@ -1,0 +1,95 @@
+{% extends "base.html" %}
+{% block title %}{{ p.name }} — Signage{% endblock %}
+{% block content %}
+<p><a href="/posters">← Все афиши</a></p>
+{% set label, cls = POSTER_STATUS[p.status] %}
+<div class="topbar">
+  <h1>{{ p.name }}</h1>
+  <span class="chip {{ cls }}">{{ label }}</span>
+  {% if p.media.transcode_status in TRANSCODE_STATUS %}
+    {% set tlabel, tcls = TRANSCODE_STATUS[p.media.transcode_status] %}
+    <span class="chip {{ tcls }}" title="{{ p.media.compat_warning or '' }}">⚙ {{ tlabel }}</span>
+  {% endif %}
+  <div class="right">
+    <form method="post" action="/posters/{{ p.id }}/toggle">
+      <button type="submit" class="btn">{{ 'Выключить' if p.enabled else 'Включить' }}</button>
+    </form>
+    <form method="post" action="/posters/{{ p.id }}/delete"
+          onsubmit="return confirm('Удалить афишу «{{ p.name }}»?')">
+      <button type="submit" class="btn danger">Удалить</button>
+    </form>
+  </div>
+</div>
+
+<div class="wizard">
+  <div>
+    <img class="preview-lg" src="/thumbs/{{ p.media.sha256 }}.jpg" alt=""
+         onerror="this.style.display='none'">
+    <p class="muted small">
+      {{ p.media.orig_name }} · {{ p.media.size_bytes|filesize }} ·
+      {{ p.media.width }}×{{ p.media.height }}
+      {% if p.media.kind == 'video' %} · {{ p.media.video_codec }} · {{ p.media.duration_sec|duration }}{% endif %}
+    </p>
+    {% if p.media.compat_warning %}
+    <div class="flash warn small">⚠ {{ p.media.compat_warning }}</div>
+    {% endif %}
+  </div>
+
+  <form method="post" action="/posters/{{ p.id }}/update">
+    <div class="panel">
+      <div class="p-head"><h3>Параметры</h3></div>
+      <div class="p-body">
+        <div class="fgrid">
+          <label>Название<input type="text" name="name" value="{{ p.name }}" required></label>
+          {% if p.media.kind == 'image' %}
+          <label>Показ, сек<input type="number" name="display_seconds"
+                 value="{{ p.display_seconds }}" min="1" max="3600"></label>
+          {% else %}
+          <input type="hidden" name="display_seconds" value="{{ p.display_seconds }}">
+          {% endif %}
+          <label>Начало показа<input type="datetime-local" name="starts_at"
+                 value="{{ p.starts_at.strftime('%Y-%m-%dT%H:%M') if p.starts_at }}"></label>
+          <label>Истекает<input type="datetime-local" name="expires_at"
+                 value="{{ p.expires_at.strftime('%Y-%m-%dT%H:%M') if p.expires_at }}"></label>
+          <label>Ежедневно с<input type="time" name="daily_from" value="{{ p.daily_from or '' }}"></label>
+          <label>до<input type="time" name="daily_until" value="{{ p.daily_until or '' }}"></label>
+        </div>
+        <span class="flabel" style="margin-top:12px">Дни недели (пусто = все)</span>
+        <div class="days">
+          {% for d in WEEKDAY_NAMES %}
+          <label class="day"><input type="checkbox" name="wd" value="{{ loop.index0 }}"
+            {{ 'checked' if p.weekdays_mask and (p.weekdays_mask // (2 ** loop.index0)) % 2 }}><span>{{ d }}</span></label>
+          {% endfor %}
+        </div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="p-head"><h3>Где показывается</h3></div>
+      <div class="p-body">
+        {% for c in cities %}
+        {% set has_dev = devices_by_city[c.id]|selectattr('id', 'in', target_device_ids)|list %}
+        <details class="dest" {{ 'open' if has_dev or cities|length == 1 }}>
+          <summary>
+            <input type="checkbox" name="city" value="{{ c.id }}"
+                   {{ 'checked' if c.id in target_city_ids }}
+                   onclick="event.stopPropagation()">
+            <b>{{ c.name }}</b><small>{{ devices_by_city[c.id]|length }} экр.</small>
+          </summary>
+          <div class="list">
+            {% for d in devices_by_city[c.id] %}
+            <label><input type="checkbox" name="device" value="{{ d.id }}"
+                   {{ 'checked' if d.id in target_device_ids }}> {{ d.name }}</label>
+            {% else %}
+            <span class="muted small">Экранов нет</span>
+            {% endfor %}
+          </div>
+        </details>
+        {% endfor %}
+      </div>
+    </div>
+
+    <button type="submit" class="btn primary big">Сохранить</button>
+  </form>
+</div>
+{% endblock %}
