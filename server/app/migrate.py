@@ -18,6 +18,8 @@ _COLUMNS = [
     ("users", "city_id", "INTEGER"),
     ("devices", "city_id", "INTEGER"),
     ("devices", "screenshot_at", "DATETIME"),
+    ("devices", "local_ip", "VARCHAR(45)"),
+    ("devices", "web_port", "INTEGER"),
 ]
 
 

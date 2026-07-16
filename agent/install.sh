@@ -8,11 +8,13 @@ set -euo pipefail
 
 SERVER=""
 CODE=""
+WEB_PASSWORD=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --server) SERVER="$2"; shift 2 ;;
-    --code)   CODE="$2";   shift 2 ;;
+    --server)       SERVER="$2";       shift 2 ;;
+    --code)         CODE="$2";         shift 2 ;;
+    --web-password) WEB_PASSWORD="$2"; shift 2 ;;
     *) echo "Неизвестный аргумент: $1" >&2; exit 1 ;;
   esac
 done
@@ -27,10 +29,15 @@ if [[ "$(id -u)" -ne 0 ]]; then
 fi
 SERVER="${SERVER%/}"
 
-echo "==> Устанавливаю зависимости (python3, mpv)…"
+echo "==> Устанавливаю зависимости (python3, mpv, network-manager)…"
 apt-get update -qq
+# network-manager и pipewire нужны локальной веб-панели устройства
+# (настройка Wi-Fi через nmcli и выбор аудиовыхода через pactl)
 DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
-  python3 mpv curl ca-certificates
+  python3 mpv curl ca-certificates network-manager \
+  pipewire pipewire-pulse wireplumber pulseaudio-utils || \
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
+  python3 mpv curl ca-certificates network-manager
 
 echo "==> Создаю пользователя signage…"
 if ! id signage >/dev/null 2>&1; then
@@ -47,16 +54,26 @@ chmod 755 /opt/signage/agent.py
 # Владелец — signage: агент обновляет agent.py сам (self-update)
 chown -R signage:signage /opt/signage
 
-echo "==> Разрешаю перезагрузку по команде из интерфейса…"
-# Пользователь signage может перезагрузить RPi без пароля (для кнопки в UI).
+echo "==> Разрешаю управление системой из панели…"
+# Пользователь signage может перезагрузить устройство, менять имя хоста и
+# управлять NetworkManager без пароля (для кнопок в панели/интерфейсе).
 cat > /etc/sudoers.d/signage <<'SUDO'
-signage ALL=(root) NOPASSWD: /sbin/reboot, /usr/sbin/reboot
+signage ALL=(root) NOPASSWD: /sbin/reboot, /usr/sbin/reboot, \
+  /usr/bin/hostnamectl, /usr/bin/nmcli
 SUDO
 chmod 440 /etc/sudoers.d/signage
+# Разрешаем пользователю signage управлять NetworkManager напрямую
+usermod -aG netdev signage 2>/dev/null || true
 
 echo "==> Регистрирую устройство…"
 sudo -u signage python3 /opt/signage/agent.py \
   --state-dir /var/lib/signage register --server "$SERVER" --code "$CODE"
+
+if [[ -n "$WEB_PASSWORD" ]]; then
+  echo "==> Задаю пароль локальной веб-панели…"
+  sudo -u signage python3 /opt/signage/agent.py \
+    --state-dir /var/lib/signage set-password --password "$WEB_PASSWORD"
+fi
 
 echo "==> Настраиваю systemd-сервис…"
 cat > /etc/systemd/system/signage-agent.service <<'UNIT'
@@ -81,6 +98,12 @@ UNIT
 systemctl daemon-reload
 systemctl enable --now signage-agent.service
 
+IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
 echo
-echo "Готово! Агент запущен. Статус: systemctl status signage-agent"
-echo "Логи:  journalctl -u signage-agent -f"
+echo "Готово! Агент запущен."
+echo "  Статус:        systemctl status signage-agent"
+echo "  Логи:          journalctl -u signage-agent -f"
+echo "  Панель устройства: http://${IP:-<IP-адрес>}:8088  (логин admin)"
+if [[ -z "$WEB_PASSWORD" ]]; then
+  echo "  Пароль панели по умолчанию: signage — смените его в разделе «Система»."
+fi

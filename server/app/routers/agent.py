@@ -159,6 +159,8 @@ class StatusIn(BaseModel):
     cache_done: int | None = None
     cache_total: int | None = None
     current: CurrentIn | None = None
+    local_ip: str | None = None
+    web_port: int | None = None
 
 
 @router.post("/status")
@@ -174,6 +176,8 @@ def status(
     device.disk_free_mb = payload.disk_free_mb
     device.cache_done = payload.cache_done
     device.cache_total = payload.cache_total
+    device.local_ip = payload.local_ip
+    device.web_port = payload.web_port
     if payload.current is not None:
         device.current_name = payload.current.name
         device.current_sha256 = payload.current.sha256

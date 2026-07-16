@@ -164,6 +164,9 @@ class Device(Base):
     current_since: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     # Последний скриншот экрана
     screenshot_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # Адрес локальной веб-панели устройства (из heartbeat)
+    local_ip: Mapped[str | None] = mapped_column(String(45), nullable=True)
+    web_port: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     city: Mapped[City | None] = relationship(back_populates="devices")
     commands: Mapped[list["DeviceCommand"]] = relationship(

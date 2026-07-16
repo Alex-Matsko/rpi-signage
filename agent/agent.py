@@ -10,10 +10,15 @@
   agent.py run [--dev]
 """
 import argparse
+import base64
 import hashlib
+import hmac
+import html
+import http.server
 import json
 import logging
 import os
+import secrets
 import shutil
 import signal
 import socket
@@ -22,16 +27,18 @@ import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime
 from pathlib import Path
 
-AGENT_VERSION = "0.4.0"
+AGENT_VERSION = "0.5.0"
 
 log = logging.getLogger("signage")
 
 DEFAULT_STATE_DIR = "/var/lib/signage"
 DEFAULT_MPV_SOCKET = "/tmp/signage-mpv.sock"
+DEFAULT_WEB_PORT = 8088
 HEARTBEAT_SEC = 30
 DOWNLOAD_CHUNK = 256 * 1024
 MPV_ARGS = [
@@ -39,6 +46,234 @@ MPV_ARGS = [
     "--keep-open=no", "--loop-file=no", "--hwdec=auto-safe",
     "--really-quiet", "--no-input-default-bindings", "--osd-level=0",
 ]
+
+
+# ---------------------------------------------------------------- настройки
+
+class Settings:
+    """Локальные настройки устройства (логин панели, аудио и пр.)."""
+
+    def __init__(self, path: Path):
+        self.path = path
+        self.data: dict = {
+            "web_user": "admin",
+            "web_pass": _hash_pw("signage"),  # пароль по умолчанию
+            "audio_output": "",   # id аудиовыхода системного бэкенда ("" = авто)
+        }
+        if path.exists():
+            try:
+                self.data.update(json.loads(path.read_text()))
+            except (json.JSONDecodeError, OSError):
+                pass
+
+    def save(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.write_text(json.dumps(self.data, ensure_ascii=False, indent=2))
+        try:
+            self.path.chmod(0o600)
+        except OSError:
+            pass
+
+    def check_password(self, user: str, password: str) -> bool:
+        return (hmac.compare_digest(user, self.data.get("web_user", "")) and
+                _verify_pw(password, self.data.get("web_pass", "")))
+
+    def set_credentials(self, user: str, password: str) -> None:
+        self.data["web_user"] = user
+        self.data["web_pass"] = _hash_pw(password)
+        self.save()
+
+
+def _hash_pw(password: str) -> str:
+    salt = secrets.token_bytes(16)
+    dk = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, 120_000)
+    return "pbkdf2$" + base64.b64encode(salt).decode() + "$" + \
+        base64.b64encode(dk).decode()
+
+
+def _verify_pw(password: str, stored: str) -> bool:
+    try:
+        _, salt_b64, dk_b64 = stored.split("$")
+        salt = base64.b64decode(salt_b64)
+        expected = base64.b64decode(dk_b64)
+        dk = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, 120_000)
+        return hmac.compare_digest(dk, expected)
+    except (ValueError, TypeError):
+        return False
+
+
+# ------------------------------------------------ системный бэкенд устройства
+
+def _run(cmd: list[str], timeout: int = 20) -> tuple[int, str]:
+    """Запускает системную команду, возвращает (код, stdout+stderr)."""
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        return p.returncode, (p.stdout + p.stderr).strip()
+    except FileNotFoundError:
+        return 127, f"команда не найдена: {cmd[0]}"
+    except subprocess.TimeoutExpired:
+        return 124, "превышено время ожидания"
+
+
+class SystemBackend:
+    """Базовый бэкенд системных настроек (переопределяется под платформу)."""
+
+    available = False
+
+    def network_status(self) -> dict:
+        return {"hostname": socket.gethostname(), "connections": [],
+                "ip": local_ip_address()}
+
+    def wifi_scan(self) -> list[dict]:
+        return []
+
+    def wifi_connect(self, ssid: str, password: str) -> tuple[bool, str]:
+        return False, "Управление сетью недоступно на этом устройстве."
+
+    def audio_outputs(self) -> list[dict]:
+        return []
+
+    def set_audio_output(self, output_id: str) -> tuple[bool, str]:
+        return True, ""
+
+    def set_hostname(self, name: str) -> tuple[bool, str]:
+        return False, "Смена имени недоступна."
+
+
+class LinuxBackend(SystemBackend):
+    """RPi OS Bookworm / Debian / Ubuntu на NUC — через NetworkManager и wpctl."""
+
+    available = True
+
+    def network_status(self) -> dict:
+        conns = []
+        rc, out = _run(["nmcli", "-t", "-f", "DEVICE,TYPE,STATE,CONNECTION",
+                        "device", "status"])
+        if rc == 0:
+            for line in out.splitlines():
+                parts = line.split(":")
+                if len(parts) >= 4 and parts[1] in ("ethernet", "wifi"):
+                    conns.append({
+                        "device": parts[0], "type": parts[1],
+                        "state": parts[2], "name": parts[3],
+                    })
+        return {"hostname": socket.gethostname(), "connections": conns,
+                "ip": local_ip_address()}
+
+    def wifi_scan(self) -> list[dict]:
+        _run(["nmcli", "device", "wifi", "rescan"], timeout=15)
+        rc, out = _run(["nmcli", "-t", "-f", "SSID,SIGNAL,SECURITY",
+                        "device", "wifi", "list"])
+        nets, seen = [], set()
+        if rc == 0:
+            for line in out.splitlines():
+                parts = line.split(":")
+                ssid = parts[0].strip()
+                if not ssid or ssid in seen:
+                    continue
+                seen.add(ssid)
+                nets.append({
+                    "ssid": ssid,
+                    "signal": parts[1] if len(parts) > 1 else "",
+                    "secure": bool(parts[2].strip()) if len(parts) > 2 else True,
+                })
+        return sorted(nets, key=lambda n: int(n["signal"] or 0), reverse=True)
+
+    def wifi_connect(self, ssid: str, password: str) -> tuple[bool, str]:
+        cmd = ["nmcli", "device", "wifi", "connect", ssid]
+        if password:
+            cmd += ["password", password]
+        rc, out = _run(cmd, timeout=45)
+        return rc == 0, out
+
+    def audio_outputs(self) -> list[dict]:
+        outs = []
+        rc, out = _run(["pactl", "list", "short", "sinks"])
+        if rc == 0:
+            for line in out.splitlines():
+                cols = line.split("\t")
+                if len(cols) >= 2:
+                    name = cols[1]
+                    label = name
+                    low = name.lower()
+                    if "hdmi" in low:
+                        label = "HDMI"
+                    elif "analog" in low or "headphone" in low or "3.5" in low:
+                        label = "Аналоговый (3.5 мм)"
+                    outs.append({"id": name, "label": f"{label} ({name})"})
+        return outs
+
+    def set_audio_output(self, output_id: str) -> tuple[bool, str]:
+        if not output_id:
+            return True, ""
+        rc, out = _run(["pactl", "set-default-sink", output_id])
+        return rc == 0, out
+
+    def set_hostname(self, name: str) -> tuple[bool, str]:
+        rc, out = _run(["sudo", "-n", "hostnamectl", "set-hostname", name])
+        return rc == 0, out
+
+
+class MockBackend(SystemBackend):
+    """Dev-режим: без реальных системных вызовов, для отладки панели."""
+
+    available = True
+
+    def __init__(self):
+        self._hostname = socket.gethostname()
+
+    def network_status(self) -> dict:
+        return {
+            "hostname": self._hostname,
+            "ip": local_ip_address(),
+            "connections": [
+                {"device": "eth0", "type": "ethernet",
+                 "state": "connected", "name": "Проводное (dev)"},
+                {"device": "wlan0", "type": "wifi",
+                 "state": "disconnected", "name": ""},
+            ],
+        }
+
+    def wifi_scan(self) -> list[dict]:
+        return [
+            {"ssid": "Kassa-Office", "signal": "82", "secure": True},
+            {"ssid": "Guest-WiFi", "signal": "55", "secure": False},
+        ]
+
+    def wifi_connect(self, ssid: str, password: str) -> tuple[bool, str]:
+        return True, f"[dev] подключение к «{ssid}» имитировано"
+
+    def audio_outputs(self) -> list[dict]:
+        return [
+            {"id": "hdmi", "label": "HDMI (dev)"},
+            {"id": "analog", "label": "Аналоговый 3.5 мм (dev)"},
+        ]
+
+    def set_hostname(self, name: str) -> tuple[bool, str]:
+        self._hostname = name
+        return True, ""
+
+
+def make_backend(dev: bool) -> SystemBackend:
+    if dev:
+        return MockBackend()
+    rc, _ = _run(["nmcli", "--version"], timeout=5)
+    if rc == 0:
+        return LinuxBackend()
+    log.warning("nmcli не найден — системные настройки в панели ограничены")
+    return SystemBackend()
+
+
+def local_ip_address() -> str:
+    """Определяет локальный IP устройства (адрес исходящего интерфейса)."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("8.8.8.8", 80))
+        return s.getsockname()[0]
+    except OSError:
+        return "127.0.0.1"
+    finally:
+        s.close()
 
 
 # ---------------------------------------------------------------- состояние
@@ -60,6 +295,8 @@ class State:
         self.cache_done = 0
         self.current: dict | None = None  # {"name","sha256","since"}
         self.started = time.monotonic()
+        self.settings_path = state_dir / "settings.json"
+        self.web_port = 0  # 0 = панель выключена
 
     def load_saved_manifest(self) -> None:
         if self.manifest_path.exists():
@@ -670,6 +907,8 @@ def heartbeat_loop(client: ServerClient, state: State,
                 "cache_done": state.cache_done,
                 "cache_total": state.cache_total,
                 "current": current,
+                "local_ip": local_ip_address(),
+                "web_port": state.web_port,
             }
         try:
             client.send_status(payload)
@@ -695,6 +934,304 @@ def playback_loop(player, state: State, placeholder: Path | None,
         player.play(item, stop)
         index += 1
     player.shutdown()
+
+
+# ------------------------------------------------ локальная веб-панель устройства
+
+_PAGE_CSS = """
+*{box-sizing:border-box}body{margin:0;font:15px/1.5 system-ui,sans-serif;
+background:#0f141d;color:#e6ebf4}header{background:#171f2b;
+border-bottom:1px solid #2b3648;padding:12px 20px;display:flex;gap:16px;
+align-items:center;flex-wrap:wrap}header b{font-size:16px}
+header a{color:#90a0b6;text-decoration:none}header a:hover{color:#e6ebf4}
+main{max-width:760px;margin:0 auto;padding:22px 16px 60px}
+h1{font-size:20px}h2{font-size:16px;margin-top:26px}
+.card{background:#171f2b;border:1px solid #2b3648;border-radius:10px;
+padding:16px;margin-bottom:14px}
+label{display:block;font-size:13px;color:#90a0b6;margin:10px 0 3px}
+input,select{width:100%;padding:9px 11px;border:1px solid #2b3648;border-radius:7px;
+background:#0f141d;color:#e6ebf4;font:inherit}
+button{margin-top:12px;padding:9px 16px;border:0;border-radius:7px;
+background:#3452c8;color:#fff;font:inherit;font-weight:600;cursor:pointer}
+button.sec{background:#2b3648}button.danger{background:#bb3737}
+table{width:100%;border-collapse:collapse}td,th{text-align:left;padding:6px 8px;
+border-bottom:1px solid #2b3648;font-size:14px}
+.flash{padding:10px 14px;border-radius:8px;margin-bottom:14px}
+.flash.ok{background:#143526;color:#4cc287}.flash.err{background:#3d1c1c;color:#e57373}
+.muted{color:#90a0b6}.kv{display:flex;justify-content:space-between;
+padding:5px 0;border-bottom:1px solid #232d3d;font-size:14px}
+"""
+
+_NAV = (
+    '<header><b>📺 Signage</b>'
+    '<a href="/">Обзор</a><a href="/network">Сеть</a>'
+    '<a href="/audio">Звук</a><a href="/system">Система</a></header>'
+)
+
+
+class WebContext:
+    def __init__(self, settings, backend, state, get_status, actions):
+        self.settings = settings
+        self.backend = backend
+        self.state = state
+        self.get_status = get_status   # () -> dict со сводкой агента
+        self.actions = actions         # {"restart_agent":fn, "reboot":fn}
+
+
+def _page(title: str, body: str, flash: str = "", flash_cls: str = "ok") -> bytes:
+    flash_html = f'<div class="flash {flash_cls}">{html.escape(flash)}</div>' if flash else ""
+    return (
+        f"<!doctype html><html lang=ru><head><meta charset=utf-8>"
+        f"<meta name=viewport content='width=device-width,initial-scale=1'>"
+        f"<title>{html.escape(title)} — Signage</title><style>{_PAGE_CSS}</style>"
+        f"</head><body>{_NAV}<main><h1>{html.escape(title)}</h1>"
+        f"{flash_html}{body}</main></body></html>"
+    ).encode()
+
+
+class _WebHandler(http.server.BaseHTTPRequestHandler):
+    server_version = "SignageAgent"
+
+    @property
+    def ctx(self) -> WebContext:
+        return self.server.ctx  # type: ignore[attr-defined]
+
+    def log_message(self, *_args):
+        pass  # не засорять журнал агента
+
+    # --- аутентификация ---
+    def _authed(self) -> bool:
+        header = self.headers.get("Authorization", "")
+        if header.startswith("Basic "):
+            try:
+                raw = base64.b64decode(header[6:]).decode()
+                user, _, password = raw.partition(":")
+            except (ValueError, UnicodeDecodeError):
+                return False
+            return self.ctx.settings.check_password(user, password)
+        return False
+
+    def _require_auth(self) -> bool:
+        if self._authed():
+            return True
+        self.send_response(401)
+        self.send_header("WWW-Authenticate", 'Basic realm="Signage device"')
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.end_headers()
+        self.wfile.write("Требуется вход".encode())
+        return False
+
+    def _form(self) -> dict:
+        length = int(self.headers.get("Content-Length", 0))
+        body = self.rfile.read(length).decode() if length else ""
+        return {k: v[0] for k, v in urllib.parse.parse_qs(body).items()}
+
+    def _send(self, data: bytes, code: int = 200,
+              ctype: str = "text/html; charset=utf-8"):
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _redirect(self, location: str):
+        self.send_response(303)
+        self.send_header("Location", location)
+        self.end_headers()
+
+    # --- маршрутизация ---
+    def do_GET(self):
+        if not self._require_auth():
+            return
+        path = urllib.parse.urlparse(self.path).path
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        flash = (query.get("msg", [""])[0], "ok") if "msg" in query else \
+                (query.get("err", [""])[0], "err") if "err" in query else ("", "ok")
+        routes = {
+            "/": self._page_overview,
+            "/network": self._page_network,
+            "/audio": self._page_audio,
+            "/system": self._page_system,
+        }
+        handler = routes.get(path)
+        if handler is None:
+            self._send(_page("Не найдено", "<p>Страница не найдена.</p>"), 404)
+            return
+        self._send(handler(flash[0], flash[1]))
+
+    def do_POST(self):
+        if not self._require_auth():
+            return
+        path = urllib.parse.urlparse(self.path).path
+        form = self._form()
+        try:
+            if path == "/network/wifi":
+                ok, out = self.ctx.backend.wifi_connect(
+                    form.get("ssid", ""), form.get("password", ""))
+                self._redirect("/network?" + urllib.parse.urlencode(
+                    {"msg": "Подключение выполнено. " + out} if ok
+                    else {"err": "Не удалось подключиться. " + out}))
+            elif path == "/audio":
+                out_id = form.get("audio_output", "")
+                ok, out = self.ctx.backend.set_audio_output(out_id)
+                if ok:
+                    self.ctx.settings.data["audio_output"] = out_id
+                    self.ctx.settings.save()
+                self._redirect("/audio?" + urllib.parse.urlencode(
+                    {"msg": "Аудиовыход сохранён."} if ok
+                    else {"err": "Не удалось переключить звук. " + out}))
+            elif path == "/system/hostname":
+                ok, out = self.ctx.backend.set_hostname(
+                    form.get("hostname", "").strip())
+                self._redirect("/system?" + urllib.parse.urlencode(
+                    {"msg": "Имя устройства изменено."} if ok
+                    else {"err": "Не удалось изменить имя. " + out}))
+            elif path == "/system/password":
+                user = form.get("user", "").strip() or "admin"
+                pw1, pw2 = form.get("password", ""), form.get("password2", "")
+                if len(pw1) < 6:
+                    self._redirect("/system?err=Пароль+короче+6+символов")
+                elif pw1 != pw2:
+                    self._redirect("/system?err=Пароли+не+совпадают")
+                else:
+                    self.ctx.settings.set_credentials(user, pw1)
+                    self._redirect("/system?msg=Логин+и+пароль+обновлены")
+            elif path == "/system/restart-agent":
+                self._redirect("/system?msg=Агент+перезапускается")
+                threading.Thread(
+                    target=lambda: (time.sleep(0.5),
+                                    self.ctx.actions["restart_agent"]()),
+                    daemon=True).start()
+            elif path == "/system/reboot":
+                ok, out = self.ctx.actions["reboot"]()
+                self._redirect("/system?" + urllib.parse.urlencode(
+                    {"msg": "Устройство перезагружается."} if ok
+                    else {"err": out}))
+            else:
+                self._send(_page("Не найдено", "<p>Нет такого действия.</p>"), 404)
+        except Exception as e:  # noqa: BLE001 — панель не должна падать
+            log.error("Ошибка веб-панели: %s", e)
+            self._redirect("/system?err=" + urllib.parse.quote(str(e)))
+
+    # --- страницы ---
+    def _page_overview(self, flash, cls):
+        s = self.ctx.get_status()
+        net = self.ctx.backend.network_status()
+        rows = "".join(
+            f'<div class="kv"><span class="muted">{html.escape(k)}</span>'
+            f'<span>{html.escape(str(v))}</span></div>'
+            for k, v in s.items())
+        return _page("Обзор устройства",
+                     f'<div class="card">{rows}</div>'
+                     f'<div class="card"><h2 style="margin-top:0">Сеть</h2>'
+                     f'<div class="kv"><span class="muted">IP-адрес</span>'
+                     f'<span>{html.escape(net["ip"])}</span></div>'
+                     f'<div class="kv"><span class="muted">Имя устройства</span>'
+                     f'<span>{html.escape(net["hostname"])}</span></div></div>',
+                     flash, cls)
+
+    def _page_network(self, flash, cls):
+        net = self.ctx.backend.network_status()
+        conn_rows = "".join(
+            f"<tr><td>{html.escape(c['device'])}</td>"
+            f"<td>{'Wi-Fi' if c['type']=='wifi' else 'Провод'}</td>"
+            f"<td>{html.escape(c['state'])}</td>"
+            f"<td>{html.escape(c['name'] or '—')}</td></tr>"
+            for c in net["connections"]) or \
+            "<tr><td colspan=4 class=muted>Интерфейсы не найдены</td></tr>"
+        nets = self.ctx.backend.wifi_scan()
+        options = "".join(
+            f'<option value="{html.escape(n["ssid"])}">{html.escape(n["ssid"])}'
+            f' ({html.escape(n["signal"])}%){" 🔒" if n["secure"] else ""}</option>'
+            for n in nets)
+        wifi_form = (
+            '<div class="card"><h2 style="margin-top:0">Подключиться к Wi-Fi</h2>'
+            '<form method=post action="/network/wifi">'
+            f'<label>Сеть</label><select name=ssid>{options}</select>'
+            '<label>Пароль</label><input type=password name=password '
+            'autocomplete=off>'
+            '<button type=submit>Подключиться</button></form></div>'
+        ) if nets else '<p class="muted">Wi-Fi-адаптер не обнаружен или сети не найдены.</p>'
+        return _page(
+            "Сеть",
+            f'<div class="card"><div class="kv"><span class="muted">Текущий IP</span>'
+            f'<span>{html.escape(net["ip"])}</span></div>'
+            f'<table><tr><th>Интерфейс</th><th>Тип</th><th>Состояние</th>'
+            f'<th>Соединение</th></tr>{conn_rows}</table></div>{wifi_form}',
+            flash, cls)
+
+    def _page_audio(self, flash, cls):
+        outs = self.ctx.backend.audio_outputs()
+        current = self.ctx.settings.data.get("audio_output", "")
+        if outs:
+            options = "".join(
+                f'<option value="{html.escape(o["id"])}"'
+                f'{" selected" if o["id"]==current else ""}>'
+                f'{html.escape(o["label"])}</option>' for o in outs)
+            body = (
+                '<div class="card"><form method=post action="/audio">'
+                '<label>Аудиовыход</label>'
+                f'<select name=audio_output>{options}</select>'
+                '<button type=submit>Сохранить</button></form>'
+                '<p class="muted" style="margin-bottom:0">Выберите HDMI или '
+                'аналоговый выход 3.5&nbsp;мм. Изменение применится в течение '
+                'одной ротации афиш.</p></div>')
+        else:
+            body = ('<div class="card muted">Аудиовыходы не обнаружены. '
+                    'Проверьте, установлен ли pipewire/pulseaudio.</div>')
+        return _page("Звук", body, flash, cls)
+
+    def _page_system(self, flash, cls):
+        net = self.ctx.backend.network_status()
+        return _page(
+            "Система",
+            '<div class="card"><h2 style="margin-top:0">Имя устройства</h2>'
+            '<form method=post action="/system/hostname">'
+            f'<input name=hostname value="{html.escape(net["hostname"])}">'
+            '<button type=submit>Сохранить</button></form></div>'
+            '<div class="card"><h2 style="margin-top:0">Доступ к панели</h2>'
+            '<form method=post action="/system/password" autocomplete=off>'
+            f'<label>Логин</label><input name=user '
+            f'value="{html.escape(self.ctx.settings.data.get("web_user","admin"))}">'
+            '<label>Новый пароль</label>'
+            '<input type=password name=password autocomplete=new-password>'
+            '<label>Повторите пароль</label>'
+            '<input type=password name=password2 autocomplete=new-password>'
+            '<button type=submit>Изменить</button></form></div>'
+            '<div class="card"><h2 style="margin-top:0">Питание</h2>'
+            '<form method=post action="/system/restart-agent" '
+            'style="display:inline">'
+            '<button type=submit class=sec>Перезапустить агент</button></form> '
+            '<form method=post action="/system/reboot" style="display:inline" '
+            'onsubmit="return confirm(\'Перезагрузить устройство?\')">'
+            '<button type=submit class=danger>Перезагрузить устройство</button>'
+            '</form></div>',
+            flash, cls)
+
+
+class LocalWebServer:
+    def __init__(self, ctx: WebContext, port: int):
+        self.ctx = ctx
+        self.port = port
+        self.httpd: http.server.ThreadingHTTPServer | None = None
+
+    def start(self) -> None:
+        try:
+            self.httpd = http.server.ThreadingHTTPServer(
+                ("0.0.0.0", self.port), _WebHandler)
+        except OSError as e:
+            log.error("Не удалось запустить веб-панель на порту %d: %s",
+                      self.port, e)
+            return
+        self.httpd.ctx = self.ctx  # type: ignore[attr-defined]
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+        log.info("Веб-панель устройства: http://%s:%d (логин %s)",
+                 local_ip_address(), self.port,
+                 self.ctx.settings.data.get("web_user", "admin"))
+
+    def stop(self) -> None:
+        if self.httpd is not None:
+            self.httpd.shutdown()
 
 
 # ---------------------------------------------------------------- запуск
@@ -762,6 +1299,41 @@ def cmd_run(args, state: State) -> int:
     signal.signal(signal.SIGTERM, _terminate)
     signal.signal(signal.SIGINT, _terminate)
 
+    # Локальная веб-панель устройства (сеть, звук, система)
+    web = None
+    if args.web_port and not args.no_web:
+        state.web_port = args.web_port
+        settings = Settings(state.settings_path)
+        backend = make_backend(args.dev)
+
+        def _status_summary() -> dict:
+            return {
+                "Версия агента": AGENT_VERSION,
+                "Сервер": auth["server"],
+                "ID устройства": auth.get("device_id", "?"),
+                "Аптайм": f"{read_uptime_sec(state) // 3600} ч",
+                "Температура CPU": (f"{read_temp_c():.0f} °C"
+                                    if read_temp_c() is not None else "—"),
+                "Свободно на диске": f"{disk_free_mb(state.cache_dir) or 0} МБ",
+                "Афиш в кеше": f"{state.cache_done}/{state.cache_total}",
+            }
+
+        def _reboot_action():
+            if not args.allow_system:
+                return False, "Перезагрузка отключена (--allow-system не задан)."
+            threading.Thread(
+                target=lambda: (time.sleep(0.5),
+                                subprocess.run(["sudo", "-n", "reboot"])),
+                daemon=True).start()
+            return True, ""
+
+        ctx = WebContext(settings, backend, state, _status_summary, {
+            "restart_agent": lambda: os._exit(0),
+            "reboot": _reboot_action,
+        })
+        web = LocalWebServer(ctx, args.web_port)
+        web.start()
+
     threads = [
         threading.Thread(target=sync_loop,
                          args=(client, state, args.poll_interval, stop,
@@ -779,6 +1351,8 @@ def cmd_run(args, state: State) -> int:
     log.info("Агент %s запущен (сервер: %s, кеш: %s)",
              AGENT_VERSION, auth["server"], state.cache_dir)
     playback_loop(player, state, placeholder, stop)
+    if web is not None:
+        web.stop()
     return 0
 
 
@@ -807,6 +1381,15 @@ def main() -> int:
                        help="обновлять agent.py с сервера при смене версии")
     p_run.add_argument("--allow-system", action="store_true",
                        help="разрешить команду перезагрузки RPi (нужен sudo)")
+    p_run.add_argument("--web-port", type=int, default=DEFAULT_WEB_PORT,
+                       help="порт локальной веб-панели устройства")
+    p_run.add_argument("--no-web", action="store_true",
+                       help="не запускать локальную веб-панель")
+
+    p_pw = sub.add_parser("set-password",
+                          help="задать логин/пароль локальной веб-панели")
+    p_pw.add_argument("--user", default="admin")
+    p_pw.add_argument("--password", required=True)
 
     args = parser.parse_args()
     logging.basicConfig(
@@ -816,6 +1399,11 @@ def main() -> int:
     state = State(Path(args.state_dir))
     if args.cmd == "register":
         return cmd_register(args, state)
+    if args.cmd == "set-password":
+        settings = Settings(state.settings_path)
+        settings.set_credentials(args.user, args.password)
+        print(f"Логин панели: {args.user} (пароль обновлён).")
+        return 0
     return cmd_run(args, state)
 
 

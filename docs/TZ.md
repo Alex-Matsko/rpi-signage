@@ -207,6 +207,23 @@ Raspberry Pi 2 / 3 / 4. Состоит из двух компонентов:
   `GET /api/agent/commands`, отчёт о результате
   `POST /api/agent/commands/{id}/result`.
 
+## 11. v0.5 — локальная веб-панель устройства + инструкция по установке
+
+- ✅ Агент поднимает собственную веб-панель на порту `8088` (Basic Auth,
+  логин/пароль хранится хешем pbkdf2 в `settings.json`):
+  - **Сеть** — статус интерфейсов, подключение к Wi-Fi через `nmcli`;
+  - **Звук** — выбор аудиовыхода HDMI / аналоговый 3.5 мм через `pactl`;
+  - **Система** — имя устройства (`hostnamectl`), смена доступа к панели,
+    перезапуск агента и перезагрузка.
+- ✅ Абстракция `SystemBackend`: `LinuxBackend` (NetworkManager/PipeWire на
+  RPi Bookworm и Debian/Ubuntu на NUC) и `MockBackend` для dev/тестов.
+- ✅ Агент шлёт `local_ip`/`web_port` в heartbeat — ссылка на панель видна
+  на странице экрана.
+- ✅ install.sh: ставит network-manager/pipewire, правило sudoers для
+  reboot/hostnamectl/nmcli, опция `--web-password`, подкоманда
+  `set-password`.
+- ✅ Инструкция по установке на RPi и Intel NUC с проверкой — `docs/INSTALL.md`.
+
 Не реализовано (по согласованию):
 
 - Мультиарендность (несколько организаций).

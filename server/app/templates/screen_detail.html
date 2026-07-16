@@ -45,6 +45,10 @@
     {{ ('%.1f'|format(device.temp_c) ~ ' °C') if device.temp_c is not none else '—' }}</div>
   <div><span class="label">Свободно на SD</span>
     {{ (device.disk_free_mb ~ ' МБ') if device.disk_free_mb is not none else '—' }}</div>
+  <div><span class="label">Локальная панель</span>
+    {% if device.local_ip and device.web_port %}
+      <a href="http://{{ device.local_ip }}:{{ device.web_port }}" target="_blank">{{ device.local_ip }}:{{ device.web_port }}</a>
+    {% else %}—{% endif %}</div>
 </div></div>
 
 <div class="panel">
