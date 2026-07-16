@@ -43,11 +43,33 @@ def _fmt_uptime(sec: int | None) -> str:
     return f"{m} мин"
 
 
+_WEEKDAYS = ("пн", "вт", "ср", "чт", "пт", "сб", "вс")
+
+
+def _fmt_weekdays(mask: int | None) -> str:
+    if not mask or mask >= 127:
+        return "ежедневно"
+    return ", ".join(d for i, d in enumerate(_WEEKDAYS) if (mask >> i) & 1)
+
+
+def _fmt_schedule(poster) -> str:
+    """Краткое описание окна показа афиши, '' если ограничений нет."""
+    parts = []
+    if poster.weekdays_mask:
+        parts.append(_fmt_weekdays(poster.weekdays_mask))
+    if poster.daily_from or poster.daily_until:
+        parts.append(f"{poster.daily_from or '00:00'}–{poster.daily_until or '24:00'}")
+    return " · ".join(parts)
+
+
 templates.env.filters["dt"] = _fmt_dt
 templates.env.filters["uptime"] = _fmt_uptime
 templates.env.filters["filesize"] = _fmt_size
 templates.env.filters["duration"] = _fmt_duration
+templates.env.filters["weekdays"] = _fmt_weekdays
+templates.env.filters["schedule"] = _fmt_schedule
 templates.env.globals["offline_after"] = config.OFFLINE_AFTER_SEC
+templates.env.globals["WEEKDAY_NAMES"] = _WEEKDAYS
 
 POSTER_STATUS = {
     "active": ("Активна", "ok"),
@@ -56,3 +78,10 @@ POSTER_STATUS = {
     "scheduled": ("Ожидает начала", "warn"),
 }
 templates.env.globals["POSTER_STATUS"] = POSTER_STATUS
+
+TRANSCODE_STATUS = {
+    "pending": ("в очереди на транскодирование", "warn"),
+    "running": ("транскодируется…", "warn"),
+    "failed": ("транскодирование не удалось", "err"),
+}
+templates.env.globals["TRANSCODE_STATUS"] = TRANSCODE_STATUS

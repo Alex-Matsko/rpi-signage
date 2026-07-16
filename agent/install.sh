@@ -44,6 +44,8 @@ echo "==> Скачиваю агента с $SERVER…"
 curl -fsSL "$SERVER/agent.py" -o /opt/signage/agent.py
 curl -fsSL "$SERVER/placeholder.png" -o /opt/signage/placeholder.png
 chmod 755 /opt/signage/agent.py
+# Владелец — signage: агент обновляет agent.py сам (self-update)
+chown -R signage:signage /opt/signage
 
 echo "==> Регистрирую устройство…"
 sudo -u signage python3 /opt/signage/agent.py \
@@ -60,7 +62,7 @@ Wants=network-online.target
 Type=simple
 User=signage
 SupplementaryGroups=video render input
-ExecStart=/usr/bin/python3 /opt/signage/agent.py run --placeholder /opt/signage/placeholder.png
+ExecStart=/usr/bin/python3 /opt/signage/agent.py run --self-update --placeholder /opt/signage/placeholder.png
 Restart=always
 RestartSec=5
 Environment=SIGNAGE_STATE_DIR=/var/lib/signage

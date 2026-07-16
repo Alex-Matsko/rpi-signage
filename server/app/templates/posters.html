@@ -21,6 +21,19 @@
     <label>Истекает (опционально)
       <input type="datetime-local" name="expires_at">
     </label>
+    <label>Ежедневно с … по … (опционально)
+      <span class="inline-form">
+        <input type="time" name="daily_from">
+        <input type="time" name="daily_until">
+      </span>
+    </label>
+    <label>Дни недели (пусто = все)
+      <span class="inline-form wd-row">
+        {% for d in WEEKDAY_NAMES %}
+        <label class="compact"><input type="checkbox" name="wd" value="{{ loop.index0 }}"> {{ d }}</label>
+        {% endfor %}
+      </span>
+    </label>
     <label>Сразу добавить в плейлист
       <select name="playlist_id">
         <option value="0">— не добавлять —</option>
@@ -42,7 +55,14 @@
     <div class="poster-title">
       <span class="badge {{ cls }}">{{ label }}</span>
       <span class="badge muted">{{ 'видео ' + (p.media.duration_sec|duration) if p.media.kind == 'video' else 'изображение' }}</span>
-      {% if p.media.compat_warning %}<span class="badge warn" title="{{ p.media.compat_warning }}">⚠ совместимость</span>{% endif %}
+      {% if p.media.transcode_status in TRANSCODE_STATUS %}
+        {% set tlabel, tcls = TRANSCODE_STATUS[p.media.transcode_status] %}
+        <span class="badge {{ tcls }}" title="{{ p.media.compat_warning or '' }}">⚙ {{ tlabel }}</span>
+      {% elif p.media.compat_warning %}
+        <span class="badge warn" title="{{ p.media.compat_warning }}">⚠ совместимость</span>
+      {% endif %}
+      {% set sched = p|schedule %}
+      {% if sched %}<span class="badge muted" title="Окно показа">🕒 {{ sched }}</span>{% endif %}
       <span class="muted small">{{ p.media.orig_name }} · {{ p.media.size_bytes|filesize }}</span>
     </div>
     <form method="post" action="/posters/{{ p.id }}/update" class="inline-form">
@@ -62,6 +82,20 @@
         <input type="datetime-local" name="expires_at"
                value="{{ p.expires_at.strftime('%Y-%m-%dT%H:%M') if p.expires_at }}">
       </label>
+      <span class="inline-form">
+        <label class="compact">окно
+          <input type="time" name="daily_from" value="{{ p.daily_from or '' }}">
+        </label>
+        <label class="compact">–
+          <input type="time" name="daily_until" value="{{ p.daily_until or '' }}">
+        </label>
+        {% for d in WEEKDAY_NAMES %}
+        <label class="compact">
+          <input type="checkbox" name="wd" value="{{ loop.index0 }}"
+                 {{ 'checked' if p.weekdays_mask and (p.weekdays_mask // (2 ** loop.index0)) % 2 }}> {{ d }}
+        </label>
+        {% endfor %}
+      </span>
       <button type="submit" class="btn">Сохранить</button>
     </form>
   </div>

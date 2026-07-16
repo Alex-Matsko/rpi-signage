@@ -30,7 +30,13 @@
   <div><span class="label">Кеш</span>
     {{ (device.cache_done or 0) ~ ' из ' ~ device.cache_total ~ ' файлов' if device.cache_total is not none else '—' }}
   </div>
-  <div><span class="label">Версия агента</span>{{ device.agent_version or '—' }}</div>
+  <div><span class="label">Версия агента</span>{{ device.agent_version or '—' }}
+    {% if server_agent_version and device.agent_version
+          and device.agent_version != server_agent_version %}
+      <span class="badge warn" title="Агент обновится сам при следующем опросе">
+        доступна {{ server_agent_version }}</span>
+    {% endif %}
+  </div>
   <div><span class="label">Аптайм</span>{{ device.uptime_sec|uptime }}</div>
   <div><span class="label">Температура CPU</span>
     {{ ('%.1f'|format(device.temp_c) ~ ' °C') if device.temp_c is not none else '—' }}</div>

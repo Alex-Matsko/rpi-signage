@@ -164,6 +164,43 @@ def _probe_video(path: Path, sha256: str) -> dict:
     }
 
 
+def transcode_video(src: Path, dst: Path) -> None:
+    """Перекодирует видео в совместимый формат: H.264 ≤1080p ≤30fps, faststart.
+
+    Разрешение уменьшается только если превышает 1920×1080 (без апскейла).
+    """
+    cmd = [
+        "ffmpeg", "-v", "error", "-y", "-i", str(src),
+        "-map", "0:v:0", "-map", "0:a:0?",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+        "-pix_fmt", "yuv420p",
+        "-vf",
+        "scale=w='min(1920,iw)':h='min(1080,ih)':"
+        "force_original_aspect_ratio=decrease:force_divisible_by=2",
+        "-fpsmax", "30",
+        "-c:a", "aac", "-b:a", "128k",
+        "-movflags", "+faststart",
+        str(dst),
+    ]
+    try:
+        subprocess.run(cmd, capture_output=True, text=True,
+                       timeout=1800, check=True)
+    except subprocess.CalledProcessError as e:
+        raise MediaError(
+            f"ffmpeg завершился с ошибкой: {(e.stderr or '').strip()[-300:]}"
+        ) from e
+    except subprocess.TimeoutExpired as e:
+        raise MediaError("Транскодирование превысило лимит 30 минут.") from e
+
+
+def file_sha256(path: Path) -> str:
+    sha = hashlib.sha256()
+    with open(path, "rb") as f:
+        while chunk := f.read(1024 * 1024):
+            sha.update(chunk)
+    return sha.hexdigest()
+
+
 def _parse_fps(rate: str | None) -> float | None:
     if not rate:
         return None

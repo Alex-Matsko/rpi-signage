@@ -19,6 +19,8 @@ jobs:
           pip install -r server/requirements.txt pytest httpx
       - name: Compile agent
         run: python -m py_compile agent/agent.py
+      - name: Run agent tests
+        run: pytest agent -q
       - name: Run server tests
         working-directory: server
         run: pytest tests -q

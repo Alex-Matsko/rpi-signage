@@ -69,10 +69,12 @@ def device_page(
     device = db.get(Device, device_id)
     if device is None:
         return redirect("/devices", err="Экран не найден.")
+    from ..routers.agent import bundled_agent_version
     return templates.TemplateResponse(request, "device_detail.html", {
         "user": user,
         "device": device,
         "manifest": build_manifest(device),
+        "server_agent_version": bundled_agent_version(),
         **_common(db),
     })
 

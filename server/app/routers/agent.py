@@ -1,7 +1,11 @@
 """API для агентов на Raspberry Pi. Авторизация — Bearer-токен устройства."""
+import functools
 import hashlib
 import json
+import os
+import re
 from datetime import datetime
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
@@ -14,6 +18,23 @@ from ..deps import current_device
 from ..models import Device, MediaFile, Playlist, now
 
 router = APIRouter(prefix="/api/agent")
+
+
+@functools.lru_cache(maxsize=1)
+def bundled_agent_version() -> str | None:
+    """Версия agent.py, который раздаёт этот сервер (для self-update агентов)."""
+    agent_dir = Path(
+        os.environ.get(
+            "SIGNAGE_AGENT_DIR",
+            Path(__file__).resolve().parents[3] / "agent",
+        )
+    )
+    try:
+        source = (agent_dir / "agent.py").read_text()
+        match = re.search(r'^AGENT_VERSION\s*=\s*"([^"]+)"', source, re.M)
+        return match.group(1) if match else None
+    except OSError:
+        return None
 
 
 def build_manifest(device: Device) -> dict:
@@ -47,6 +68,9 @@ def build_manifest(device: Device) -> dict:
                 ),
                 "starts_at": poster.starts_at.isoformat() if poster.starts_at else None,
                 "expires_at": poster.expires_at.isoformat() if poster.expires_at else None,
+                "daily_from": poster.daily_from or None,
+                "daily_until": poster.daily_until or None,
+                "weekdays": poster.weekdays_mask or None,
             })
     version = hashlib.sha256(
         json.dumps(items, sort_keys=True, ensure_ascii=False).encode()
@@ -55,6 +79,7 @@ def build_manifest(device: Device) -> dict:
         "manifest_version": version,
         "poll_interval": config.POLL_INTERVAL,
         "generated_at": now().isoformat(),
+        "agent_version": bundled_agent_version(),
         "items": items,
     }
 

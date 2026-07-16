@@ -1,7 +1,9 @@
+import re
+
 from fastapi import APIRouter, Depends, Form, Request, UploadFile
 from sqlalchemy.orm import Session
 
-from .. import media
+from .. import media, worker
 from ..db import get_db
 from ..deps import current_user
 from ..models import MediaFile, Playlist, Poster, User
@@ -9,6 +11,24 @@ from ..templating import templates
 from ..utils import parse_dt_local, redirect
 
 router = APIRouter(prefix="/posters")
+
+
+def _parse_daily(value: str) -> str | None:
+    """Проверяет время 'HH:MM' из input type=time ('' -> None)."""
+    value = value.strip()
+    if not value:
+        return None
+    if not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", value):
+        return None
+    return value
+
+
+def _weekdays_mask(wd: list[int]) -> int | None:
+    mask = 0
+    for day in wd:
+        if 0 <= day <= 6:
+            mask |= 1 << day
+    return mask if 0 < mask < 127 else None  # все 7 дней = без ограничения
 
 
 @router.get("")
@@ -33,6 +53,9 @@ def upload_poster(
     display_seconds: int = Form(10),
     starts_at: str = Form(""),
     expires_at: str = Form(""),
+    daily_from: str = Form(""),
+    daily_until: str = Form(""),
+    wd: list[int] = Form([]),
     playlist_id: int = Form(0),
     user: User = Depends(current_user),
     db: Session = Depends(get_db),
@@ -45,6 +68,8 @@ def upload_poster(
     mf = db.query(MediaFile).filter(MediaFile.sha256 == attrs["sha256"]).first()
     if mf is None:
         mf = MediaFile(**attrs)
+        if mf.kind == "video" and not mf.compatible:
+            mf.transcode_status = "pending"
         db.add(mf)
         db.flush()
 
@@ -54,12 +79,17 @@ def upload_poster(
         display_seconds=max(1, display_seconds),
         starts_at=parse_dt_local(starts_at),
         expires_at=parse_dt_local(expires_at),
+        daily_from=_parse_daily(daily_from),
+        daily_until=_parse_daily(daily_until),
+        weekdays_mask=_weekdays_mask(wd),
         enabled=True,
     )
     db.add(poster)
     db.flush()
 
     msg = f"Афиша «{poster.name}» загружена."
+    if mf.transcode_status == "pending":
+        msg += " Видео поставлено в очередь на транскодирование."
     if playlist_id:
         playlist = db.get(Playlist, playlist_id)
         if playlist is not None:
@@ -69,6 +99,8 @@ def upload_poster(
             msg += f" Добавлена в плейлист «{playlist.name}»."
     db.commit()
 
+    if mf.transcode_status == "pending":
+        worker.enqueue(mf.id)
     if mf.compat_warning:
         return redirect("/posters", msg=msg, err=mf.compat_warning)
     return redirect("/posters", msg=msg)
@@ -81,6 +113,9 @@ def update_poster(
     display_seconds: int = Form(10),
     starts_at: str = Form(""),
     expires_at: str = Form(""),
+    daily_from: str = Form(""),
+    daily_until: str = Form(""),
+    wd: list[int] = Form([]),
     user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ):
@@ -91,6 +126,9 @@ def update_poster(
     poster.display_seconds = max(1, display_seconds)
     poster.starts_at = parse_dt_local(starts_at)
     poster.expires_at = parse_dt_local(expires_at)
+    poster.daily_from = _parse_daily(daily_from)
+    poster.daily_until = _parse_daily(daily_until)
+    poster.weekdays_mask = _weekdays_mask(wd)
     db.commit()
     return redirect("/posters", msg=f"Афиша «{poster.name}» обновлена.")
 

@@ -7,16 +7,17 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import config, security
+from . import config, security, worker
 from .db import Base, SessionLocal, engine
 from .deps import AuthRedirect
+from .migrate import run_migrations
 from .models import User
 from .routers import (
     agent, auth, dashboard, devices, groups, media_lib, playlists, posters,
     users,
 )
 
-APP_VERSION = "0.1.0"
+APP_VERSION = "0.2.0"
 
 
 def _bootstrap_admin() -> None:
@@ -47,7 +48,9 @@ def _bootstrap_admin() -> None:
 def create_app() -> FastAPI:
     config.ensure_dirs()
     Base.metadata.create_all(engine)
+    run_migrations(engine)
     _bootstrap_admin()
+    worker.start()
 
     app = FastAPI(title="RPi Signage", version=APP_VERSION,
                   docs_url=None, redoc_url=None)

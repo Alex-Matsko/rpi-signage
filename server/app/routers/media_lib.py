@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
-from .. import media
+from .. import media, worker
 from ..db import get_db
 from ..deps import current_user
 from ..models import MediaFile, User
@@ -10,6 +10,24 @@ from ..templating import templates
 from ..utils import redirect
 
 router = APIRouter()
+
+
+@router.post("/media/{media_id}/transcode")
+def retry_transcode(
+    media_id: int,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    """Повторная постановка несовместимого видео в очередь транскодирования."""
+    mf = db.get(MediaFile, media_id)
+    if mf is None:
+        return redirect("/media", err="Файл не найден.")
+    if mf.kind != "video" or mf.compatible:
+        return redirect("/media", err="Файл не требует транскодирования.")
+    mf.transcode_status = "pending"
+    db.commit()
+    worker.enqueue(mf.id)
+    return redirect("/media", msg=f"«{mf.orig_name}» поставлен в очередь.")
 
 
 @router.get("/media")

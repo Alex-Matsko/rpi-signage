@@ -26,7 +26,7 @@ import urllib.request
 from datetime import datetime
 from pathlib import Path
 
-AGENT_VERSION = "0.1.0"
+AGENT_VERSION = "0.2.0"
 
 log = logging.getLogger("signage")
 
@@ -100,17 +100,36 @@ class State:
     def playable_items(self) -> list[dict]:
         """Элементы, действующие прямо сейчас (по локальным часам)."""
         t = datetime.now()
-        result = []
         with self.lock:
-            for item in self.items:
-                starts = item.get("starts_at")
-                expires = item.get("expires_at")
-                if starts and datetime.fromisoformat(starts) > t:
-                    continue
-                if expires and datetime.fromisoformat(expires) <= t:
-                    continue
-                result.append(item)
-        return result
+            return [item for item in self.items if item_is_active(item, t)]
+
+
+def item_is_active(item: dict, t: datetime) -> bool:
+    """Действует ли элемент манифеста в момент t (локальные часы устройства).
+
+    Учитывает даты начала/истечения, дни недели (битовая маска, бит 0 = пн)
+    и ежедневное окно показа, в том числе через полночь (22:00–06:00).
+    """
+    starts = item.get("starts_at")
+    if starts and datetime.fromisoformat(starts) > t:
+        return False
+    expires = item.get("expires_at")
+    if expires and datetime.fromisoformat(expires) <= t:
+        return False
+    mask = item.get("weekdays")
+    if mask and not (mask >> t.weekday()) & 1:
+        return False
+    frm, until = item.get("daily_from"), item.get("daily_until")
+    if frm or until:
+        cur = t.strftime("%H:%M")
+        if frm and until:
+            if frm <= until:
+                return frm <= cur < until
+            return cur >= frm or cur < until  # окно через полночь
+        if frm:
+            return cur >= frm
+        return cur < until
+    return True
 
 
 # ---------------------------------------------------------------- сервер
@@ -342,15 +361,48 @@ def disk_free_mb(path: Path) -> int | None:
         return None
 
 
+# ---------------------------------------------------------------- self-update
+
+def self_update(client: ServerClient, server_version: str) -> None:
+    """Заменяет собственный файл версией с сервера и перезапускает процесс.
+
+    Вызывается только с флагом --self-update (ставится install.sh):
+    в dev-режиме и при запуске из репозитория обновление выключено.
+    """
+    own_path = Path(__file__).resolve()
+    log.info("Обновление агента %s -> %s", AGENT_VERSION, server_version)
+    req = urllib.request.Request(client.server + "/agent.py")
+    with urllib.request.urlopen(req, timeout=60) as resp:
+        source = resp.read()
+    # Проверяем, что скачался корректный Python с ожидаемой версией
+    compile(source, str(own_path), "exec")
+    if f'AGENT_VERSION = "{server_version}"'.encode() not in source:
+        raise ValueError("версия в скачанном agent.py не совпадает с манифестом")
+    tmp = own_path.with_suffix(".new")
+    tmp.write_bytes(source)
+    tmp.chmod(0o755)
+    tmp.rename(own_path)
+    log.info("Агент обновлён, выходим — systemd перезапустит новую версию "
+             "и корректно завершит mpv")
+    os._exit(0)
+
+
 # ---------------------------------------------------------------- циклы
 
 def sync_loop(client: ServerClient, state: State, poll_interval: int,
-              stop: threading.Event) -> None:
+              stop: threading.Event, allow_self_update: bool = False) -> None:
     """Опрос манифеста, докачка кеша, очистка сирот."""
     last_version = None
     while not stop.is_set():
         try:
             manifest = client.manifest()
+            server_agent = manifest.get("agent_version")
+            if (allow_self_update and server_agent
+                    and server_agent != AGENT_VERSION):
+                try:
+                    self_update(client, server_agent)  # не возвращается
+                except Exception as e:
+                    log.error("Self-update не удался: %s", e)
             version = manifest.get("manifest_version")
             poll_interval = manifest.get("poll_interval", poll_interval)
             items = manifest.get("items", [])
@@ -496,7 +548,8 @@ def cmd_run(args, state: State) -> int:
 
     threads = [
         threading.Thread(target=sync_loop,
-                         args=(client, state, args.poll_interval, stop),
+                         args=(client, state, args.poll_interval, stop,
+                               args.self_update and not args.dev),
                          daemon=True),
         threading.Thread(target=heartbeat_loop, args=(client, state, stop),
                          daemon=True),
@@ -531,6 +584,8 @@ def main() -> int:
     p_run.add_argument("--placeholder",
                        default=os.environ.get("SIGNAGE_PLACEHOLDER", ""),
                        help="изображение-заставка, когда контента нет")
+    p_run.add_argument("--self-update", action="store_true",
+                       help="обновлять agent.py с сервера при смене версии")
 
     args = parser.parse_args()
     logging.basicConfig(

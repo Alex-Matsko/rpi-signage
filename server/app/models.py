@@ -35,6 +35,10 @@ class MediaFile(Base):
     video_codec: Mapped[str | None] = mapped_column(String(32), nullable=True)
     compatible: Mapped[bool] = mapped_column(Boolean, default=True)
     compat_warning: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # none | pending | running | done | failed
+    transcode_status: Mapped[str] = mapped_column(
+        String(8), default="none", server_default="none"
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
 
     posters: Mapped[list["Poster"]] = relationship(back_populates="media")
@@ -49,6 +53,11 @@ class Poster(Base):
     display_seconds: Mapped[int] = mapped_column(Integer, default=10)
     starts_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # Ежедневное окно показа "HH:MM" (окно через полночь допустимо: 20:00–02:00)
+    daily_from: Mapped[str | None] = mapped_column(String(5), nullable=True)
+    daily_until: Mapped[str | None] = mapped_column(String(5), nullable=True)
+    # Битовая маска дней недели (бит 0 = понедельник); NULL/0 = все дни
+    weekdays_mask: Mapped[int | None] = mapped_column(Integer, nullable=True)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
 
