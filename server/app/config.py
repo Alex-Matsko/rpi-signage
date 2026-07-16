@@ -7,8 +7,12 @@ DATA_DIR = Path(os.environ.get("SIGNAGE_DATA_DIR", "./data")).resolve()
 DB_DIR = DATA_DIR / "db"
 MEDIA_DIR = DATA_DIR / "media"
 THUMB_DIR = DATA_DIR / "thumbs"
+SHOT_DIR = DATA_DIR / "screenshots"
 DB_PATH = DB_DIR / "signage.db"
 SECRET_KEY_FILE = DATA_DIR / "secret_key"
+
+# Максимальный размер скриншота экрана, МБ
+MAX_SCREENSHOT_MB = int(os.environ.get("SIGNAGE_MAX_SCREENSHOT_MB", "8"))
 
 MAX_UPLOAD_MB = int(os.environ.get("SIGNAGE_MAX_UPLOAD_MB", "1024"))
 POLL_INTERVAL = int(os.environ.get("SIGNAGE_POLL_INTERVAL", "60"))
@@ -41,5 +45,5 @@ def secret_key() -> str:
 
 
 def ensure_dirs() -> None:
-    for d in (DB_DIR, MEDIA_DIR, THUMB_DIR):
+    for d in (DB_DIR, MEDIA_DIR, THUMB_DIR, SHOT_DIR):
         d.mkdir(parents=True, exist_ok=True)

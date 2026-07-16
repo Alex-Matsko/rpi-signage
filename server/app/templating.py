@@ -85,3 +85,17 @@ TRANSCODE_STATUS = {
     "failed": ("транскодирование не удалось", "err"),
 }
 templates.env.globals["TRANSCODE_STATUS"] = TRANSCODE_STATUS
+
+COMMAND_STATUS = {
+    "pending": ("отправлена", "warn"),
+    "done": ("выполнена", "ok"),
+    "failed": ("ошибка", "err"),
+}
+templates.env.globals["COMMAND_STATUS"] = COMMAND_STATUS
+
+COMMAND_KINDS = {
+    "screenshot": "Скриншот",
+    "restart_agent": "Перезапуск агента",
+    "reboot": "Перезагрузка RPi",
+}
+templates.env.globals["COMMAND_KINDS"] = COMMAND_KINDS

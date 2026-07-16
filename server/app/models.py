@@ -162,10 +162,38 @@ class Device(Base):
     current_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     current_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
     current_since: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # Последний скриншот экрана
+    screenshot_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     city: Mapped[City | None] = relationship(back_populates="devices")
+    commands: Mapped[list["DeviceCommand"]] = relationship(
+        back_populates="device", cascade="all, delete-orphan"
+    )
 
     def is_online(self, offline_after_sec: int) -> bool:
         if self.last_seen_at is None:
             return False
         return (now() - self.last_seen_at).total_seconds() < offline_after_sec
+
+
+class DeviceCommand(Base):
+    """Команда для агента: агент забирает её при опросе и отчитывается о результате.
+
+    Типы: restart_agent | reboot | screenshot.
+    """
+
+    __tablename__ = "device_commands"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    device_id: Mapped[int] = mapped_column(ForeignKey("devices.id"), index=True)
+    kind: Mapped[str] = mapped_column(String(24))
+    # Доп. параметр (для shell — id сессии терминала)
+    param: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    status: Mapped[str] = mapped_column(String(12), default="pending")  # pending|done|failed
+    result: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"),
+                                                   nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    done_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    device: Mapped[Device] = relationship(back_populates="commands")

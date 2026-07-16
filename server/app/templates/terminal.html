@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Терминал — {{ device.name }}</title>
+<link rel="stylesheet" href="/static/vendor/xterm.css">
+<style>
+  html, body { margin: 0; height: 100%; background: #0d1017; color: #e6ebf4;
+    font: 14px system-ui, sans-serif; }
+  .term-head { display: flex; align-items: center; gap: 12px; padding: 8px 14px;
+    background: #171f2b; border-bottom: 1px solid #2b3648; }
+  .term-head b { font-size: 14px; }
+  .term-head .status { margin-left: auto; font-size: 12.5px; color: #90a0b6; }
+  .term-head .status.on { color: #4cc287; }
+  .term-head .status.off { color: #e57373; }
+  #term { position: absolute; top: 41px; left: 0; right: 0; bottom: 0; padding: 6px 8px; }
+</style>
+</head>
+<body>
+<div class="term-head">
+  <b>⌨ {{ device.name }}</b>
+  {% if device.city %}<span style="color:#90a0b6">{{ device.city.name }}</span>{% endif %}
+  <span class="status" id="status">подключение…</span>
+</div>
+<div id="term"></div>
+
+<script src="/static/vendor/xterm.js"></script>
+<script src="/static/vendor/addon-fit.js"></script>
+<script>
+  const term = new Terminal({
+    fontSize: 13, cursorBlink: true,
+    theme: { background: '#0d1017', foreground: '#e6ebf4' },
+  });
+  const fit = new FitAddon.FitAddon();
+  term.loadAddon(fit);
+  term.open(document.getElementById('term'));
+  fit.fit();
+
+  const status = document.getElementById('status');
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  const ws = new WebSocket(`${proto}://${location.host}/screens/{{ device.id }}/terminal/ws`);
+  ws.binaryType = 'arraybuffer';
+
+  ws.onopen = () => {
+    status.textContent = 'подключено'; status.className = 'status on';
+    term.focus();
+  };
+  ws.onmessage = (ev) => term.write(new Uint8Array(ev.data));
+  ws.onclose = () => {
+    status.textContent = 'соединение закрыто'; status.className = 'status off';
+    term.write('\r\n\x1b[31m— сессия завершена —\x1b[0m\r\n');
+  };
+  ws.onerror = () => { status.textContent = 'ошибка соединения'; status.className = 'status off'; };
+
+  term.onData((data) => { if (ws.readyState === 1) ws.send(data); });
+  window.addEventListener('resize', () => fit.fit());
+</script>
+</body>
+</html>

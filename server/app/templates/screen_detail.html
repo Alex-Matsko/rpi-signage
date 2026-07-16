@@ -82,6 +82,63 @@
   {% endfor %}
 </table>
 
+{% if device.token_hash %}
+<h2>Управление экраном</h2>
+<div class="wizard">
+  <div class="panel">
+    <div class="p-head"><h3>Что сейчас на экране</h3>
+      <span class="right muted small">{{ ('снято ' + (device.screenshot_at|dt)) if device.screenshot_at else 'скриншота ещё нет' }}</span>
+    </div>
+    <div class="p-body">
+      {% if device.screenshot_at %}
+      <img class="preview-lg" src="/screens/{{ device.id }}/screenshot.png?t={{ device.screenshot_at.timestamp()|int }}" alt="Скриншот экрана">
+      {% else %}
+      <p class="muted">Нажмите «Сделать скриншот» — агент снимет текущий кадр и пришлёт его сюда.</p>
+      {% endif %}
+      <div class="row-actions" style="margin-top:12px">
+        <form method="post" action="/screens/{{ device.id }}/command">
+          <input type="hidden" name="kind" value="screenshot">
+          <button type="submit" class="btn primary">📷 Сделать скриншот</button>
+        </form>
+        <a class="btn" href="/screens/{{ device.id }}/terminal" target="_blank">⌨ Открыть терминал (SSH)</a>
+      </div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="p-head"><h3>Питание и агент</h3></div>
+    <div class="p-body">
+      <div class="row-actions">
+        <form method="post" action="/screens/{{ device.id }}/command"
+              onsubmit="return confirm('Перезапустить агент на «{{ device.name }}»?')">
+          <input type="hidden" name="kind" value="restart_agent">
+          <button type="submit" class="btn">↻ Перезапустить агент</button>
+        </form>
+        <form method="post" action="/screens/{{ device.id }}/command"
+              onsubmit="return confirm('Перезагрузить Raspberry Pi «{{ device.name }}»? Экран погаснет на ~1 минуту.')">
+          <input type="hidden" name="kind" value="reboot">
+          <button type="submit" class="btn danger">⏻ Перезагрузить RPi</button>
+        </form>
+      </div>
+      {% if recent_commands %}
+      <table class="table" style="margin-top:14px">
+        <tr><th>Команда</th><th>Статус</th><th>Когда</th></tr>
+        {% for c in recent_commands %}
+        {% set clabel, ccls = COMMAND_STATUS[c.status] %}
+        <tr>
+          <td>{{ COMMAND_KINDS.get(c.kind, c.kind) }}</td>
+          <td><span class="chip {{ ccls }}">{{ clabel }}</span>
+            {% if c.result and c.status == 'failed' %}<span class="muted small">{{ c.result }}</span>{% endif %}</td>
+          <td class="small">{{ (c.done_at or c.created_at)|dt }}</td>
+        </tr>
+        {% endfor %}
+      </table>
+      {% endif %}
+    </div>
+  </div>
+</div>
+{% endif %}
+
 <h2>Обслуживание</h2>
 <div class="row-actions">
   <form method="post" action="/screens/{{ device.id }}/repair"

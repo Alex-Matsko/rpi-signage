@@ -7,7 +7,7 @@ import re
 from datetime import datetime
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -17,9 +17,13 @@ from sqlalchemy import or_
 from .. import config, media, security
 from ..db import get_db
 from ..deps import current_device
-from ..models import Device, MediaFile, Poster, PosterTarget, now
+from ..models import Device, DeviceCommand, MediaFile, Poster, PosterTarget, now
+from ..terminal import broker
 
 router = APIRouter(prefix="/api/agent")
+
+# Максимальное время удержания длинного опроса команд, сек
+COMMAND_POLL_TIMEOUT = 25
 
 
 @functools.lru_cache(maxsize=1)
@@ -185,4 +189,118 @@ def status(
     return {
         "ok": True,
         "manifest_version": build_manifest(device, db)["manifest_version"],
+        "has_commands": db.query(DeviceCommand).filter(
+            DeviceCommand.device_id == device.id,
+            DeviceCommand.status == "pending",
+        ).count() > 0,
     }
+
+
+# ------------------------------------------------ команды управления экраном
+
+def _pending_commands(device: Device, db: Session) -> list[dict]:
+    cmds = (
+        db.query(DeviceCommand)
+        .filter(DeviceCommand.device_id == device.id,
+                DeviceCommand.status == "pending")
+        .order_by(DeviceCommand.id)
+        .all()
+    )
+    return [{"id": c.id, "kind": c.kind, "param": c.param} for c in cmds]
+
+
+@router.get("/commands")
+def get_commands(
+    device: Device = Depends(current_device),
+    db: Session = Depends(get_db),
+):
+    """Долгий опрос: агент ждёт появления команд, чтобы реагировать быстро."""
+    import time
+    deadline = time.monotonic() + COMMAND_POLL_TIMEOUT
+    while True:
+        cmds = _pending_commands(device, db)
+        if cmds or time.monotonic() >= deadline:
+            device.last_seen_at = now()
+            db.commit()
+            return {"commands": cmds}
+        time.sleep(1.0)
+        db.expire_all()
+
+
+class CommandResultIn(BaseModel):
+    status: str  # done | failed
+    result: str | None = None
+
+
+@router.post("/commands/{command_id}/result")
+def command_result(
+    command_id: int,
+    payload: CommandResultIn,
+    device: Device = Depends(current_device),
+    db: Session = Depends(get_db),
+):
+    cmd = db.get(DeviceCommand, command_id)
+    if cmd is None or cmd.device_id != device.id:
+        raise HTTPException(status_code=404, detail="command not found")
+    cmd.status = "done" if payload.status == "done" else "failed"
+    cmd.result = (payload.result or "")[:4000]
+    cmd.done_at = now()
+    db.commit()
+    return {"ok": True}
+
+
+@router.post("/screenshot")
+async def upload_screenshot(
+    request: Request,
+    device: Device = Depends(current_device),
+    db: Session = Depends(get_db),
+):
+    """Агент присылает PNG-кадр текущего экрана (сырое тело запроса)."""
+    data = await request.body()
+    if not data or len(data) > config.MAX_SCREENSHOT_MB * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="bad screenshot")
+    path = config.SHOT_DIR / f"{device.id}.png"
+    path.write_bytes(data)
+    device.screenshot_at = now()
+    db.commit()
+    return {"ok": True}
+
+
+# ------------------------------------------------ веб-терминал (сторона агента)
+
+@router.get("/term/{session_id}/input")
+def term_input(
+    session_id: str,
+    after: int = 0,
+    device: Device = Depends(current_device),
+):
+    session = broker.get(session_id)
+    if session is None or session.device_id != device.id:
+        raise HTTPException(status_code=404, detail="session not found")
+    data, closed = session.agent_wait_input(after, timeout=20.0)
+    return {"data": data.decode("latin1"), "closed": closed,
+            "consumed": after + len(data)}
+
+
+@router.post("/term/{session_id}/output")
+async def term_output(
+    session_id: str,
+    request: Request,
+    device: Device = Depends(current_device),
+):
+    session = broker.get(session_id)
+    if session is None or session.device_id != device.id:
+        raise HTTPException(status_code=404, detail="session not found")
+    session.agent_send(await request.body())
+    return Response(status_code=204)
+
+
+@router.post("/term/{session_id}/close")
+def term_close(
+    session_id: str,
+    device: Device = Depends(current_device),
+):
+    session = broker.get(session_id)
+    if session is not None and session.device_id == device.id:
+        broker.close(session_id)
+    return {"ok": True}

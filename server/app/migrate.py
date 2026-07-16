@@ -17,6 +17,7 @@ _COLUMNS = [
     ("users", "role", "VARCHAR(16) NOT NULL DEFAULT 'admin'"),
     ("users", "city_id", "INTEGER"),
     ("devices", "city_id", "INTEGER"),
+    ("devices", "screenshot_at", "DATETIME"),
 ]
 
 

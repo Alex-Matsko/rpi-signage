@@ -26,7 +26,7 @@ import urllib.request
 from datetime import datetime
 from pathlib import Path
 
-AGENT_VERSION = "0.2.0"
+AGENT_VERSION = "0.4.0"
 
 log = logging.getLogger("signage")
 
@@ -151,6 +151,17 @@ class ServerClient:
         with urllib.request.urlopen(req, data=data, timeout=timeout) as resp:
             return json.loads(resp.read())
 
+    def _raw(self, method: str, path: str, body: bytes | None = None,
+             timeout: int = 30) -> bytes:
+        req = urllib.request.Request(self.server + path, method=method,
+                                     data=body)
+        if self.token:
+            req.add_header("Authorization", f"Bearer {self.token}")
+        if body is not None:
+            req.add_header("Content-Type", "application/octet-stream")
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.read()
+
     def register(self, code: str) -> dict:
         return self._request("POST", "/api/agent/register", {"code": code})
 
@@ -159,6 +170,34 @@ class ServerClient:
 
     def send_status(self, payload: dict) -> dict:
         return self._request("POST", "/api/agent/status", payload, timeout=15)
+
+    def get_commands(self) -> list[dict]:
+        return self._request("GET", "/api/agent/commands", timeout=30).get(
+            "commands", [])
+
+    def command_result(self, command_id: int, status: str,
+                       result: str = "") -> None:
+        self._request("POST", f"/api/agent/commands/{command_id}/result",
+                      {"status": status, "result": result}, timeout=15)
+
+    def upload_screenshot(self, png: bytes) -> None:
+        self._raw("POST", "/api/agent/screenshot", png, timeout=30)
+
+    def term_input(self, session_id: str, after: int) -> dict:
+        return self._request(
+            "GET", f"/api/agent/term/{session_id}/input?after={after}",
+            timeout=30)
+
+    def term_output(self, session_id: str, data: bytes) -> None:
+        self._raw("POST", f"/api/agent/term/{session_id}/output", data,
+                  timeout=15)
+
+    def term_close(self, session_id: str) -> None:
+        try:
+            self._request("POST", f"/api/agent/term/{session_id}/close",
+                          {}, timeout=10)
+        except Exception:
+            pass
 
     def download(self, url_path: str, dest: Path) -> None:
         """Скачивает файл с докачкой (.part + Range) и переименовывает."""
@@ -212,8 +251,24 @@ class MockPlayer:
         log.info("[mock] ▶ нет контента (заставка)")
         stop.wait(timeout=10)
 
+    def screenshot(self) -> bytes:
+        """Заглушка-PNG (1×1) — чтобы протокол скриншотов работал в dev-режиме."""
+        return _tiny_png()
+
     def shutdown(self) -> None:
         pass
+
+
+# Минимальный валидный PNG 1×1 (серый пиксель) — без внешних зависимостей
+_TINY_PNG = bytes.fromhex(
+    "89504e470d0a1a0a0000000d49484452000000010000000108020000009077"
+    "53de0000000c49444154789c6360606000000004000160f0a2b40000000049"
+    "454e44ae426082"
+)
+
+
+def _tiny_png() -> bytes:
+    return _TINY_PNG
 
 
 class MpvPlayer:
@@ -318,6 +373,38 @@ class MpvPlayer:
             self._close()
             stop.wait(timeout=5)
 
+    def screenshot(self) -> bytes:
+        """Кадр текущего экрана через отдельное IPC-подключение к mpv."""
+        if self.proc is None or self.proc.poll() is not None:
+            raise RuntimeError("mpv не запущен")
+        tmp = Path(f"/tmp/signage-shot-{os.getpid()}.png")
+        s = socket.socket(socket.AF_UNIX)
+        s.settimeout(5.0)
+        s.connect(self.socket_path)
+        try:
+            s.sendall(json.dumps(
+                {"command": ["screenshot-to-file", str(tmp), "video"]}
+            ).encode() + b"\n")
+            buf = b""
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                try:
+                    data = s.recv(4096)
+                except socket.timeout:
+                    break
+                if not data:
+                    break
+                buf += data
+                if b'"error"' in buf:
+                    break
+        finally:
+            s.close()
+        if not tmp.exists():
+            raise RuntimeError("mpv не создал скриншот")
+        png = tmp.read_bytes()
+        tmp.unlink(missing_ok=True)
+        return png
+
     def _close(self) -> None:
         if self.sock is not None:
             try:
@@ -335,6 +422,135 @@ class MpvPlayer:
 
     def shutdown(self) -> None:
         self._close()
+
+
+# ---------------------------------------------------------------- команды
+
+def run_terminal(client: "ServerClient", session_id: str,
+                 stop_root: threading.Event) -> None:
+    """Запускает интерактивный shell в pty и связывает его с сервером."""
+    import pty
+
+    pid, fd = pty.fork()
+    if pid == 0:  # дочерний процесс: становится shell
+        os.environ["TERM"] = "xterm-256color"
+        shell = os.environ.get("SHELL", "/bin/bash")
+        try:
+            os.execvp(shell, [shell, "-i"])
+        except OSError:
+            os.execvp("/bin/sh", ["/bin/sh", "-i"])
+        os._exit(1)
+
+    log.info("Терминал %s открыт (pid %d)", session_id[:8], pid)
+    closed = threading.Event()
+
+    def reader():
+        try:
+            while not closed.is_set():
+                try:
+                    data = os.read(fd, 4096)
+                except OSError:
+                    break
+                if not data:
+                    break
+                try:
+                    client.term_output(session_id, data)
+                except Exception:
+                    break
+        finally:
+            closed.set()
+
+    threading.Thread(target=reader, daemon=True).start()
+
+    consumed = 0
+    try:
+        while not closed.is_set() and not stop_root.is_set():
+            try:
+                resp = client.term_input(session_id, consumed)
+            except Exception:
+                time.sleep(1)
+                continue
+            data = resp.get("data", "").encode("latin1")
+            if data:
+                try:
+                    os.write(fd, data)
+                except OSError:
+                    break
+                consumed = resp.get("consumed", consumed + len(data))
+            if resp.get("closed"):
+                break
+    finally:
+        closed.set()
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        try:
+            os.kill(pid, signal.SIGKILL)
+            os.waitpid(pid, 0)
+        except OSError:
+            pass
+        client.term_close(session_id)
+        log.info("Терминал %s закрыт", session_id[:8])
+
+
+def handle_command(client: "ServerClient", player, cmd: dict,
+                   allow_system: bool, stop: threading.Event) -> None:
+    kind = cmd["kind"]
+    cid = cmd["id"]
+    try:
+        if kind == "screenshot":
+            png = player.screenshot()
+            client.upload_screenshot(png)
+            client.command_result(cid, "done", "Скриншот загружен")
+
+        elif kind == "restart_agent":
+            client.command_result(cid, "done", "Агент перезапускается")
+            log.info("Команда: перезапуск агента")
+            stop.set()
+            os._exit(0)  # systemd поднимет заново
+
+        elif kind == "reboot":
+            if not allow_system:
+                client.command_result(
+                    cid, "failed",
+                    "Перезагрузка отключена (агент запущен без --allow-system)")
+                return
+            client.command_result(cid, "done", "Raspberry Pi перезагружается")
+            log.info("Команда: перезагрузка устройства")
+            subprocess.run(["sudo", "-n", "reboot"], timeout=15)
+
+        elif kind == "shell":
+            session_id = cmd.get("param")
+            if not session_id:
+                client.command_result(cid, "failed", "Нет id сессии")
+                return
+            client.command_result(cid, "done", "Сессия терминала открыта")
+            threading.Thread(
+                target=run_terminal, args=(client, session_id, stop),
+                daemon=True).start()
+        else:
+            client.command_result(cid, "failed", f"Неизвестная команда: {kind}")
+    except Exception as e:
+        log.error("Команда %s (%s) не выполнена: %s", kind, cid, e)
+        try:
+            client.command_result(cid, "failed", str(e))
+        except Exception:
+            pass
+
+
+def command_loop(client: "ServerClient", player, allow_system: bool,
+                 stop: threading.Event) -> None:
+    """Долгий опрос команд управления экраном."""
+    while not stop.is_set():
+        try:
+            cmds = client.get_commands()
+        except Exception as e:
+            log.debug("Опрос команд не удался: %s", e)
+            stop.wait(timeout=5)
+            continue
+        for cmd in cmds:
+            handle_command(client, player, cmd, allow_system, stop)
 
 
 # ---------------------------------------------------------------- метрики
@@ -553,6 +769,9 @@ def cmd_run(args, state: State) -> int:
                          daemon=True),
         threading.Thread(target=heartbeat_loop, args=(client, state, stop),
                          daemon=True),
+        threading.Thread(target=command_loop,
+                         args=(client, player, args.allow_system, stop),
+                         daemon=True),
     ]
     for t in threads:
         t.start()
@@ -586,6 +805,8 @@ def main() -> int:
                        help="изображение-заставка, когда контента нет")
     p_run.add_argument("--self-update", action="store_true",
                        help="обновлять agent.py с сервера при смене версии")
+    p_run.add_argument("--allow-system", action="store_true",
+                       help="разрешить команду перезагрузки RPi (нужен sudo)")
 
     args = parser.parse_args()
     logging.basicConfig(

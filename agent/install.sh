@@ -47,6 +47,13 @@ chmod 755 /opt/signage/agent.py
 # Владелец — signage: агент обновляет agent.py сам (self-update)
 chown -R signage:signage /opt/signage
 
+echo "==> Разрешаю перезагрузку по команде из интерфейса…"
+# Пользователь signage может перезагрузить RPi без пароля (для кнопки в UI).
+cat > /etc/sudoers.d/signage <<'SUDO'
+signage ALL=(root) NOPASSWD: /sbin/reboot, /usr/sbin/reboot
+SUDO
+chmod 440 /etc/sudoers.d/signage
+
 echo "==> Регистрирую устройство…"
 sudo -u signage python3 /opt/signage/agent.py \
   --state-dir /var/lib/signage register --server "$SERVER" --code "$CODE"
@@ -62,7 +69,7 @@ Wants=network-online.target
 Type=simple
 User=signage
 SupplementaryGroups=video render input
-ExecStart=/usr/bin/python3 /opt/signage/agent.py run --self-update --placeholder /opt/signage/placeholder.png
+ExecStart=/usr/bin/python3 /opt/signage/agent.py run --self-update --allow-system --placeholder /opt/signage/placeholder.png
 Restart=always
 RestartSec=5
 Environment=SIGNAGE_STATE_DIR=/var/lib/signage

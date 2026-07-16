@@ -1,19 +1,33 @@
 """Экраны (кассы), сгруппированные по городам, и управление городами."""
-from fastapi import APIRouter, Depends, Form, Request
+import asyncio
+
+from fastapi import (
+    APIRouter, Depends, Form, HTTPException, Request, WebSocket,
+    WebSocketDisconnect,
+)
+from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from .. import config, security
-from ..db import get_db
+from ..db import SessionLocal, get_db
 from ..deps import (
     check_city_access, check_device_access, current_user, require_admin,
     visible_cities,
 )
-from ..models import City, Device, PosterTarget, User
+from ..models import City, Device, DeviceCommand, PosterTarget, User
 from ..routers.agent import build_manifest, bundled_agent_version
+from ..security import read_session
 from ..templating import templates
+from ..terminal import broker
 from ..utils import redirect
 
 router = APIRouter()
+
+COMMAND_LABELS = {
+    "screenshot": "Сделать скриншот",
+    "restart_agent": "Перезапустить агент",
+    "reboot": "Перезагрузить Raspberry Pi",
+}
 
 
 @router.get("/screens")
@@ -73,6 +87,14 @@ def screen_page(
     if device is None:
         return redirect("/screens", err="Экран не найден.")
     check_device_access(user, device)
+    recent_commands = (
+        db.query(DeviceCommand)
+        .filter(DeviceCommand.device_id == device_id,
+                DeviceCommand.kind != "shell")
+        .order_by(DeviceCommand.id.desc())
+        .limit(8)
+        .all()
+    )
     return templates.TemplateResponse(request, "screen_detail.html", {
         "user": user,
         "device": device,
@@ -80,7 +102,130 @@ def screen_page(
         "cities": visible_cities(user, db),
         "server_agent_version": bundled_agent_version(),
         "offline_after": config.OFFLINE_AFTER_SEC,
+        "recent_commands": recent_commands,
+        "command_labels": COMMAND_LABELS,
     })
+
+
+@router.post("/screens/{device_id}/command")
+def send_command(
+    device_id: int,
+    kind: str = Form(...),
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    device = db.get(Device, device_id)
+    if device is None:
+        return redirect("/screens", err="Экран не найден.")
+    check_device_access(user, device)
+    if kind not in COMMAND_LABELS:
+        return redirect(f"/screens/{device_id}", err="Неизвестная команда.")
+    if device.token_hash is None:
+        return redirect(f"/screens/{device_id}",
+                        err="Экран ещё не подключён.")
+    db.add(DeviceCommand(device_id=device_id, kind=kind, created_by=user.id))
+    db.commit()
+    return redirect(f"/screens/{device_id}",
+                    msg=f"Команда «{COMMAND_LABELS[kind]}» отправлена на экран.")
+
+
+@router.get("/screens/{device_id}/screenshot.png")
+def screenshot(
+    device_id: int,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    device = db.get(Device, device_id)
+    if device is None:
+        raise HTTPException(status_code=404)
+    check_device_access(user, device)
+    path = config.SHOT_DIR / f"{device_id}.png"
+    if not path.exists():
+        raise HTTPException(status_code=404)
+    return FileResponse(path, media_type="image/png",
+                        headers={"Cache-Control": "no-store"})
+
+
+@router.get("/screens/{device_id}/terminal")
+def terminal_page(
+    device_id: int,
+    request: Request,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    device = db.get(Device, device_id)
+    if device is None:
+        return redirect("/screens", err="Экран не найден.")
+    check_device_access(user, device)
+    return templates.TemplateResponse(request, "terminal.html", {
+        "user": user,
+        "device": device,
+        "online": device.is_online(config.OFFLINE_AFTER_SEC),
+    })
+
+
+def _ws_user(websocket: WebSocket, db: Session) -> User | None:
+    cookie = websocket.cookies.get(config.SESSION_COOKIE)
+    if not cookie:
+        return None
+    uid = read_session(cookie)
+    return db.get(User, uid) if uid is not None else None
+
+
+@router.websocket("/screens/{device_id}/terminal/ws")
+async def terminal_ws(websocket: WebSocket, device_id: int):
+    """Мост браузер⇄агент: keystrokes вниз, вывод pty вверх."""
+    await websocket.accept()
+    db = SessionLocal()
+    try:
+        user = _ws_user(websocket, db)
+        device = db.get(Device, device_id)
+        if user is None or device is None:
+            await websocket.close(code=4401)
+            return
+        if not user.is_admin and device.city_id != user.city_id:
+            await websocket.close(code=4403)
+            return
+        if device.token_hash is None:
+            await websocket.close(code=4404)
+            return
+        session = broker.open(device_id)
+        db.add(DeviceCommand(device_id=device_id, kind="shell",
+                             param=session.id, created_by=user.id))
+        db.commit()
+    finally:
+        db.close()
+
+    async def pump_to_agent():
+        try:
+            while True:
+                text = await websocket.receive_text()
+                session.browser_send(text.encode("utf-8", "replace"))
+        except WebSocketDisconnect:
+            pass
+        finally:
+            broker.close(session.id)
+
+    async def pump_to_browser():
+        sent = 0
+        while True:
+            data, closed = await asyncio.to_thread(
+                session.browser_wait_output, sent, 20.0)
+            if data:
+                sent += len(data)
+                await websocket.send_bytes(data)
+            if closed:
+                break
+
+    reader = asyncio.create_task(pump_to_agent())
+    writer = asyncio.create_task(pump_to_browser())
+    try:
+        await asyncio.wait({reader, writer},
+                           return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        broker.close(session.id)
+        reader.cancel()
+        writer.cancel()
 
 
 @router.post("/screens/{device_id}/update")

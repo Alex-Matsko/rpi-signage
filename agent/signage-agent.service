@@ -7,7 +7,7 @@ Wants=network-online.target
 Type=simple
 User=signage
 SupplementaryGroups=video render input
-ExecStart=/usr/bin/python3 /opt/signage/agent.py run --self-update --placeholder /opt/signage/placeholder.png
+ExecStart=/usr/bin/python3 /opt/signage/agent.py run --self-update --allow-system --placeholder /opt/signage/placeholder.png
 Restart=always
 RestartSec=5
 Environment=SIGNAGE_STATE_DIR=/var/lib/signage

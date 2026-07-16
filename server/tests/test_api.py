@@ -220,6 +220,85 @@ def test_agent_requires_token(client):
     assert client.get("/api/agent/manifest", headers=bad).status_code == 401
 
 
+def test_command_and_screenshot_flow(admin, client):
+    """UI ставит команду → агент забирает → шлёт скриншот → он виден в UI."""
+    city_id = _create_city(admin, "Челябинск")
+    device_id, code = _create_screen(admin, "Касса управления", city_id)
+    headers = _register_agent(client, code)
+
+    # Команда скриншота из интерфейса
+    resp = admin.post(f"/screens/{device_id}/command",
+                      data={"kind": "screenshot"}, follow_redirects=False)
+    assert "msg=" in resp.headers["location"]
+
+    # Агент забирает её (короткий long-poll вернёт сразу)
+    cmds = client.get("/api/agent/commands", headers=headers).json()["commands"]
+    assert len(cmds) == 1 and cmds[0]["kind"] == "screenshot"
+    command_id = cmds[0]["id"]
+
+    # Агент грузит PNG и отчитывается
+    png = _png_bytes("black")
+    resp = client.post("/api/agent/screenshot", headers=headers, content=png)
+    assert resp.status_code == 200
+    resp = client.post(f"/api/agent/commands/{command_id}/result",
+                       headers=headers, json={"status": "done"})
+    assert resp.status_code == 200
+
+    # Скриншот доступен в UI, команда отмечена выполненной
+    shot = admin.get(f"/screens/{device_id}/screenshot.png")
+    assert shot.status_code == 200 and shot.content == png
+    page = admin.get(f"/screens/{device_id}")
+    assert "выполнена" in page.text
+
+    # Команда на неподключённый экран отклоняется
+    _dev2, _code2 = _create_screen(admin, "Не подключён", city_id)
+    resp = admin.post(f"/screens/{_dev2}/command",
+                      data={"kind": "screenshot"}, follow_redirects=False)
+    assert "err=" in resp.headers["location"]
+
+
+def test_command_reboot_gated_and_reported(admin, client):
+    city_id = _create_city(admin, "Омск")
+    device_id, code = _create_screen(admin, "Касса reboot", city_id)
+    headers = _register_agent(client, code)
+    admin.post(f"/screens/{device_id}/command", data={"kind": "reboot"},
+               follow_redirects=False)
+    cmds = client.get("/api/agent/commands", headers=headers).json()["commands"]
+    assert cmds[0]["kind"] == "reboot"
+    # Агент без --allow-system сообщает об отказе
+    client.post(f"/api/agent/commands/{cmds[0]['id']}/result", headers=headers,
+                json={"status": "failed", "result": "отключено"})
+    page = admin.get(f"/screens/{device_id}")
+    assert "ошибка" in page.text
+
+
+def test_terminal_broker_roundtrip():
+    """Мост терминала переносит байты в обе стороны и корректно закрывается."""
+    from app.terminal import broker
+
+    session = broker.open(device_id=42)
+    # браузер → агент
+    session.browser_send(b"ls -la\n")
+    data, closed = session.agent_wait_input(0, timeout=1)
+    assert data == b"ls -la\n" and not closed
+    # агент → браузер
+    session.agent_send(b"total 0\n")
+    out, closed = session.browser_wait_output(0, timeout=1)
+    assert out == b"total 0\n" and not closed
+    # закрытие будит обе стороны
+    broker.close(session.id)
+    _, closed = session.agent_wait_input(len(data), timeout=1)
+    assert closed
+    assert broker.get(session.id) is None
+
+
+def test_terminal_requires_access(admin, client):
+    """Эндпойнты терминала агента требуют валидную сессию этого устройства."""
+    resp = client.get("/api/agent/term/nonexistent/input",
+                      headers={"Authorization": "Bearer x"})
+    assert resp.status_code == 401  # плохой токен раньше, чем сессия
+
+
 def test_transcode_incompatible_video(admin):
     """Несовместимое видео транскодируется воркером в H.264."""
     import shutil as _shutil
