@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% block title %}Пользователи — RPi Signage{% endblock %}
+{% block content %}
+<h1>Пользователи</h1>
+
+<form method="post" action="/users/create" class="inline-form panel" autocomplete="off">
+  <input type="text" name="username" placeholder="Логин" required>
+  <input type="password" name="password" placeholder="Пароль (мин. 8 символов)"
+         required minlength="8" autocomplete="new-password">
+  <button type="submit" class="btn primary">Создать</button>
+</form>
+
+<table class="table">
+  <tr><th>Логин</th><th>Создан</th><th>Сменить пароль</th><th></th></tr>
+  {% for u in users %}
+  <tr>
+    <td>{{ u.username }}{% if u.id == user.id %} <span class="badge muted">это вы</span>{% endif %}</td>
+    <td class="small">{{ u.created_at|dt }}</td>
+    <td>
+      <form method="post" action="/users/{{ u.id }}/password" class="inline-form">
+        <input type="password" name="password" placeholder="Новый пароль"
+               required minlength="8" autocomplete="new-password">
+        <button type="submit" class="btn">Сменить</button>
+      </form>
+    </td>
+    <td>
+      {% if u.id != user.id %}
+      <form method="post" action="/users/{{ u.id }}/delete"
+            onsubmit="return confirm('Удалить пользователя «{{ u.username }}»?')">
+        <button type="submit" class="btn danger">Удалить</button>
+      </form>
+      {% endif %}
+    </td>
+  </tr>
+  {% endfor %}
+</table>
+{% endblock %}

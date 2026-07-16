@@ -1,0 +1,81 @@
+{% extends "base.html" %}
+{% block title %}Афиши — RPi Signage{% endblock %}
+{% block content %}
+<h1>Афиши</h1>
+
+<details class="panel" {{ 'open' if not posters }}>
+  <summary>➕ Загрузить новую афишу</summary>
+  <form method="post" action="/posters/upload" enctype="multipart/form-data" class="grid-form">
+    <label>Файл (JPEG, PNG, MP4)
+      <input type="file" name="file" accept="image/jpeg,image/png,video/mp4" required>
+    </label>
+    <label>Название (по умолчанию — имя файла)
+      <input type="text" name="name" placeholder="Афиша концерта">
+    </label>
+    <label>Показ изображения, сек
+      <input type="number" name="display_seconds" value="10" min="1" max="3600">
+    </label>
+    <label>Начало показа (опционально)
+      <input type="datetime-local" name="starts_at">
+    </label>
+    <label>Истекает (опционально)
+      <input type="datetime-local" name="expires_at">
+    </label>
+    <label>Сразу добавить в плейлист
+      <select name="playlist_id">
+        <option value="0">— не добавлять —</option>
+        {% for pl in playlists %}<option value="{{ pl.id }}">{{ pl.name }}</option>{% endfor %}
+      </select>
+    </label>
+    <button type="submit" class="btn primary">Загрузить</button>
+  </form>
+  <p class="muted small">Видео: H.264 (AVC), до 1920×1080, до 30 fps — иначе
+    RPi 2/3/4 не смогут аппаратно декодировать.</p>
+</details>
+
+{% for p in posters %}
+{% set label, cls = POSTER_STATUS[p.status] %}
+<div class="poster-row">
+  <img class="thumb" src="/thumbs/{{ p.media.sha256 }}.jpg" alt=""
+       onerror="this.style.visibility='hidden'">
+  <div class="poster-main">
+    <div class="poster-title">
+      <span class="badge {{ cls }}">{{ label }}</span>
+      <span class="badge muted">{{ 'видео ' + (p.media.duration_sec|duration) if p.media.kind == 'video' else 'изображение' }}</span>
+      {% if p.media.compat_warning %}<span class="badge warn" title="{{ p.media.compat_warning }}">⚠ совместимость</span>{% endif %}
+      <span class="muted small">{{ p.media.orig_name }} · {{ p.media.size_bytes|filesize }}</span>
+    </div>
+    <form method="post" action="/posters/{{ p.id }}/update" class="inline-form">
+      <input type="text" name="name" value="{{ p.name }}" class="grow" required>
+      {% if p.media.kind == 'image' %}
+      <label class="compact">сек
+        <input type="number" name="display_seconds" value="{{ p.display_seconds }}" min="1" max="3600" class="narrow">
+      </label>
+      {% else %}
+      <input type="hidden" name="display_seconds" value="{{ p.display_seconds }}">
+      {% endif %}
+      <label class="compact">с
+        <input type="datetime-local" name="starts_at"
+               value="{{ p.starts_at.strftime('%Y-%m-%dT%H:%M') if p.starts_at }}">
+      </label>
+      <label class="compact">до
+        <input type="datetime-local" name="expires_at"
+               value="{{ p.expires_at.strftime('%Y-%m-%dT%H:%M') if p.expires_at }}">
+      </label>
+      <button type="submit" class="btn">Сохранить</button>
+    </form>
+  </div>
+  <div class="poster-actions">
+    <form method="post" action="/posters/{{ p.id }}/toggle">
+      <button type="submit" class="btn">{{ 'Выключить' if p.enabled else 'Включить' }}</button>
+    </form>
+    <form method="post" action="/posters/{{ p.id }}/delete"
+          onsubmit="return confirm('Удалить афишу «{{ p.name }}»?')">
+      <button type="submit" class="btn danger">Удалить</button>
+    </form>
+  </div>
+</div>
+{% else %}
+<p class="muted">Афиш пока нет — загрузите первую.</p>
+{% endfor %}
+{% endblock %}

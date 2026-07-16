@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}RPi Signage{% endblock %}</title>
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<header>
+  <nav>
+    <span class="brand">📺 Signage</span>
+    {% set path = request.url.path %}
+    <a href="/" class="{{ 'active' if path == '/' }}">Дашборд</a>
+    <a href="/posters" class="{{ 'active' if path.startswith('/posters') }}">Афиши</a>
+    <a href="/playlists" class="{{ 'active' if path.startswith('/playlists') }}">Плейлисты</a>
+    <a href="/devices" class="{{ 'active' if path.startswith('/devices') }}">Экраны</a>
+    <a href="/groups" class="{{ 'active' if path.startswith('/groups') }}">Группы</a>
+    <a href="/media" class="{{ 'active' if path.startswith('/media') }}">Медиатека</a>
+    <a href="/users" class="{{ 'active' if path.startswith('/users') }}">Пользователи</a>
+    <span class="spacer"></span>
+    <span class="muted">{{ user.username }}</span>
+    <a href="/logout">Выйти</a>
+  </nav>
+</header>
+<main>
+  {% set msg = request.query_params.get('msg') %}
+  {% set err = request.query_params.get('err') %}
+  {% if msg %}<div class="flash ok">{{ msg }}</div>{% endif %}
+  {% if err %}<div class="flash err">{{ err }}</div>{% endif %}
+  {% block content %}{% endblock %}
+</main>
+</body>
+</html>

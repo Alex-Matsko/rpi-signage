@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% block title %}Медиатека — RPi Signage{% endblock %}
+{% block content %}
+<h1>Медиатека</h1>
+<p class="muted">Все загруженные файлы. Файлы загружаются на странице
+  <a href="/posters">Афиши</a>; один файл может использоваться несколькими афишами.</p>
+
+<table class="table">
+  <tr>
+    <th></th><th>Файл</th><th>Тип</th><th>Размер</th><th>Параметры</th>
+    <th>Афиш</th><th>Загружен</th><th></th>
+  </tr>
+  {% for f in files %}
+  <tr>
+    <td><img class="mini-thumb" src="/thumbs/{{ f.sha256 }}.jpg" alt=""
+             onerror="this.style.visibility='hidden'"></td>
+    <td><a href="/media/{{ f.id }}/download">{{ f.orig_name }}</a></td>
+    <td>{{ 'видео' if f.kind == 'video' else 'изображение' }}</td>
+    <td>{{ f.size_bytes|filesize }}</td>
+    <td class="small">
+      {{ f.width }}×{{ f.height }}
+      {% if f.kind == 'video' %}· {{ f.video_codec }} · {{ f.duration_sec|duration }}{% endif %}
+      {% if f.compat_warning %}<br><span class="badge warn">⚠ {{ f.compat_warning }}</span>{% endif %}
+    </td>
+    <td>{{ f.posters|length }}</td>
+    <td class="small">{{ f.created_at|dt }}</td>
+    <td>
+      <form method="post" action="/media/{{ f.id }}/delete"
+            onsubmit="return confirm('Удалить файл «{{ f.orig_name }}»?')">
+        <button type="submit" class="btn danger" {{ 'disabled' if f.posters }}>Удалить</button>
+      </form>
+    </td>
+  </tr>
+  {% else %}
+  <tr><td colspan="8" class="muted">Файлов пока нет.</td></tr>
+  {% endfor %}
+</table>
+{% endblock %}

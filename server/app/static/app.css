@@ -1,0 +1,287 @@
+:root {
+  --bg: #f5f6f8;
+  --panel: #ffffff;
+  --text: #1c2330;
+  --muted: #6b7280;
+  --border: #d9dde3;
+  --accent: #2563eb;
+  --accent-dark: #1d4ed8;
+  --ok: #15803d;
+  --ok-bg: #dcfce7;
+  --warn: #a16207;
+  --warn-bg: #fef9c3;
+  --err: #b91c1c;
+  --err-bg: #fee2e2;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-size: 15px;
+  background: var(--bg);
+  color: var(--text);
+}
+
+header {
+  background: #111827;
+  color: #e5e7eb;
+}
+
+nav {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 0 16px;
+  flex-wrap: wrap;
+}
+
+nav .brand { font-weight: 700; padding: 12px 12px 12px 0; }
+nav a {
+  color: #cbd5e1;
+  text-decoration: none;
+  padding: 12px 10px;
+}
+nav a:hover { color: #fff; }
+nav a.active { color: #fff; box-shadow: inset 0 -3px 0 var(--accent); }
+nav .spacer { flex: 1; }
+
+main {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 20px 16px 60px;
+}
+
+h1 { font-size: 24px; margin: 12px 0 16px; }
+h2 { font-size: 18px; margin: 24px 0 10px; }
+
+a { color: var(--accent); }
+
+.muted { color: var(--muted); }
+.small { font-size: 13px; }
+.label {
+  display: block;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  margin-bottom: 2px;
+}
+
+.flash {
+  padding: 10px 14px;
+  border-radius: 8px;
+  margin: 0 0 12px;
+}
+.flash.ok { background: var(--ok-bg); color: var(--ok); }
+.flash.warn { background: var(--warn-bg); color: var(--warn); }
+.flash.err { background: var(--err-bg); color: var(--err); }
+
+.badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  vertical-align: middle;
+}
+.badge.ok { background: var(--ok-bg); color: var(--ok); }
+.badge.warn { background: var(--warn-bg); color: var(--warn); }
+.badge.err { background: var(--err-bg); color: var(--err); }
+.badge.muted { background: #e5e7eb; color: var(--muted); }
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 14px 16px;
+  margin-bottom: 16px;
+}
+
+details.panel summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+details.panel[open] summary { margin-bottom: 12px; }
+
+/* Формы */
+input[type=text], input[type=password], input[type=number],
+input[type=datetime-local], input[type=file], select {
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  font: inherit;
+  background: #fff;
+  max-width: 100%;
+}
+label { display: block; font-size: 14px; }
+label.compact { display: inline-flex; align-items: center; gap: 6px; }
+
+.grid-form {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+  align-items: end;
+}
+.grid-form label input, .grid-form label select { width: 100%; margin-top: 4px; }
+
+.inline-form {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.grow { flex: 1; min-width: 160px; }
+.narrow { width: 70px; }
+
+.btn {
+  padding: 7px 14px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: #fff;
+  font: inherit;
+  cursor: pointer;
+}
+.btn:hover { background: #f3f4f6; }
+.btn.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+.btn.primary:hover { background: var(--accent-dark); }
+.btn.danger { color: var(--err); border-color: #f3c1c1; }
+.btn.danger:hover { background: var(--err-bg); }
+.btn:disabled { opacity: 0.4; cursor: default; }
+.btn.wide { width: 100%; }
+
+/* Таблицы */
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+}
+.table th, .table td {
+  text-align: left;
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+}
+.table th {
+  background: #f9fafb;
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--muted);
+}
+.table tr:last-child td { border-bottom: none; }
+
+.row-actions { display: flex; gap: 6px; }
+.row-actions form { display: inline; }
+
+/* Карточки дашборда */
+.cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 14px;
+}
+.card {
+  display: block;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 14px;
+  text-decoration: none;
+  color: inherit;
+}
+.card:hover { border-color: var(--accent); }
+.card-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 10px;
+}
+.card-body { display: flex; gap: 10px; align-items: center; min-height: 56px; }
+.card-foot { margin-top: 10px; }
+
+/* Афиши */
+.poster-row {
+  display: flex;
+  gap: 14px;
+  align-items: flex-start;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px 14px;
+  margin-bottom: 10px;
+}
+.poster-main { flex: 1; min-width: 0; }
+.poster-title {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+.poster-actions { display: flex; flex-direction: column; gap: 6px; }
+
+.thumb {
+  width: 120px;
+  height: 80px;
+  object-fit: cover;
+  border-radius: 6px;
+  background: #e5e7eb;
+  flex-shrink: 0;
+}
+.mini-thumb {
+  width: 56px;
+  height: 38px;
+  object-fit: cover;
+  border-radius: 4px;
+  background: #e5e7eb;
+}
+
+/* Устройство */
+.info-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 14px;
+}
+.pairing-code {
+  font-size: 22px;
+  letter-spacing: 2px;
+  background: #eef2ff;
+  padding: 2px 10px;
+  border-radius: 6px;
+}
+pre {
+  background: #111827;
+  color: #d1d5db;
+  padding: 12px;
+  border-radius: 8px;
+  overflow-x: auto;
+  font-size: 13px;
+}
+
+/* Логин */
+.login-page {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+}
+.login-box {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 32px;
+  width: 340px;
+}
+.login-box h1 { text-align: center; font-size: 20px; margin: 0 0 20px; }
+.login-box label { margin-bottom: 12px; }
+.login-box input { width: 100%; margin-top: 4px; }
