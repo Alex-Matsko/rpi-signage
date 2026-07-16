@@ -14,12 +14,29 @@
         <label class="dropzone" id="dz">
           <b>Перетащите файлы сюда</b>
           или нажмите, чтобы выбрать — JPEG, PNG, MP4, сразу несколько
-          <input type="file" name="files" id="files" multiple required
+          <input type="file" name="files" id="files" multiple
                  accept="image/jpeg,image/png,video/mp4">
         </label>
         <div class="file-list" id="flist"></div>
         <p class="note">Название афиши берётся из имени файла (можно изменить
           после публикации). Несовместимое видео перекодируется автоматически.</p>
+
+        {% if library %}
+        <details style="margin-top:6px">
+          <summary style="cursor:pointer;font-weight:600">📚 …или выбрать из медиатеки ({{ library|length }})</summary>
+          <div class="file-list" style="max-height:220px;overflow-y:auto">
+            {% for m in library %}
+            <label class="file-row" style="cursor:pointer">
+              <input type="checkbox" name="library" value="{{ m.id }}" class="lib-cb">
+              <img class="mini-thumb" src="/thumbs/{{ m.sha256 }}.jpg" alt=""
+                   onerror="this.style.visibility='hidden'">
+              <span class="fname">{{ m.orig_name }}
+                <small>{{ 'видео' if m.kind == 'video' else 'изображение' }} · {{ m.size_bytes|filesize }}</small></span>
+            </label>
+            {% endfor %}
+          </div>
+        </details>
+        {% endif %}
       </div>
     </div>
 
@@ -105,18 +122,20 @@
   }
   function updateSummary() {
     const nf = input.files.length;
+    const lib = document.querySelectorAll('input[name=library]:checked').length;
     const cities = document.querySelectorAll('input[name=city]:checked').length;
     const devs = document.querySelectorAll('input[name=device]:checked').length;
     const parts = [];
-    if (nf) parts.push(nf + ' файл(ов)');
+    if (nf) parts.push(nf + ' новых файлов');
+    if (lib) parts.push(lib + ' из медиатеки');
     if (cities) parts.push(cities + ' гор. целиком');
     if (devs) parts.push(devs + ' отдельных экранов');
-    summary.textContent = parts.length >= 2 || (nf && (cities || devs))
+    summary.textContent = (nf + lib > 0) && (cities || devs)
       ? parts.join(' · ')
-      : 'Выберите файлы и хотя бы один город или экран';
+      : 'Выберите контент и хотя бы один город или экран';
   }
   input.addEventListener('change', renderFiles);
-  document.querySelectorAll('input[name=city], input[name=device]')
+  document.querySelectorAll('input[name=city], input[name=device], input[name=library]')
     .forEach(cb => cb.addEventListener('change', updateSummary));
 
   ['dragover', 'dragenter'].forEach(ev => dz.addEventListener(ev, e => {

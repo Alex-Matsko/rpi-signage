@@ -107,12 +107,19 @@ def test_mock_backend_shapes():
 @pytest.fixture
 def panel(tmp_path):
     settings = agent.Settings(tmp_path / "settings.json")
+    state = agent.State(tmp_path / "state")
+    state.cache_dir.mkdir(parents=True, exist_ok=True)
+    bind_calls = []
     ctx = agent.WebContext(
-        settings, agent.MockBackend(), state=None,
+        settings, agent.MockBackend(), state=state,
         get_status=lambda: {"Версия агента": "test"},
         actions={"restart_agent": lambda: None,
                  "reboot": lambda: (True, "")},
+        auth_info=lambda: None,
+        bind=lambda server, code: (bind_calls.append((server, code)) or
+                                   (True, "привязано")),
     )
+    ctx.bind_calls = bind_calls
     server = agent.LocalWebServer(ctx, port=0)
     import http.server
     server.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0),
@@ -174,3 +181,51 @@ def test_panel_change_password(panel):
     assert status == 401
     status, _ = _req(port, "GET", "/", auth=("boss", "longpass"))
     assert status == 200
+
+
+# ------------------------------------------------ v0.6: сервер, хранилище, tz
+
+def test_panel_server_and_storage_pages(panel):
+    _settings, port = panel
+    for path, needle in [("/server", "Привязать к серверу"),
+                         ("/storage", "Хранилище")]:
+        status, body = _req(port, "GET", path)
+        assert status == 200 and needle in body, path
+
+
+def test_panel_bind_calls_action(panel):
+    settings, port = panel
+    status, _ = _req(port, "POST", "/server/bind",
+                     body="server=https://s.example.com&code=AB12-CD34")
+    assert status == 303
+
+
+def test_panel_timezone_in_system(panel):
+    _settings, port = panel
+    status, body = _req(port, "GET", "/system")
+    assert status == 200 and "Часовой пояс" in body
+    status, _ = _req(port, "POST", "/system/timezone",
+                     body="timezone=Asia/Yekaterinburg")
+    assert status == 303
+
+
+def test_cache_report_and_delete(tmp_path):
+    state = agent.State(tmp_path / "st")
+    state.cache_dir.mkdir(parents=True, exist_ok=True)
+    (state.cache_dir / ("a" * 64)).write_bytes(b"x" * 2048)
+    sha = "b" * 64
+    (state.cache_dir / sha).write_bytes(b"y" * 1024)
+    state.items = [{"sha256": sha, "name": "Афиша Б"}]
+    rep = agent.cache_report(state)
+    assert rep["total_mb"] > 0
+    assert len(rep["files"]) == 2
+    by_sha = {f["sha256"]: f for f in rep["files"]}
+    assert by_sha[sha]["name"] == "Афиша Б" and by_sha[sha]["in_use"]
+    # Удаление одного файла
+    assert agent.delete_cached(state, sha)
+    assert not (state.cache_dir / sha).exists()
+    # Защита от обхода пути
+    assert not agent.delete_cached(state, "../evil")
+    # Полная очистка
+    removed = agent.clear_cache(state)
+    assert removed == 1 and not any(state.cache_dir.iterdir())

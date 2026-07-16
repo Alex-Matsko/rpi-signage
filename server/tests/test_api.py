@@ -220,6 +220,66 @@ def test_agent_requires_token(client):
     assert client.get("/api/agent/manifest", headers=bad).status_code == 401
 
 
+def test_media_library_upload_and_publish_from_it(admin, client):
+    """Загрузка в медиатеку без публикации, затем публикация из библиотеки."""
+    # Загрузка в библиотеку — афиш не создаётся
+    resp = admin.post(
+        "/media/upload",
+        files=[("files", ("lib1.png", _png_bytes("teal"), "image/png"))],
+        follow_redirects=False,
+    )
+    assert "msg=" in resp.headers["location"]
+    with SessionLocal() as db:
+        mf = db.query(MediaFile).filter(MediaFile.orig_name == "lib1.png").one()
+        media_id = mf.id
+        assert mf.posters == []  # афиш ещё нет
+
+    page = admin.get("/media")
+    assert "lib1.png" in page.text
+    # Файл предлагается на странице публикации
+    assert f'name="library" value="{media_id}"' in admin.get("/publish").text
+
+    # Публикуем из библиотеки (без загрузки новых файлов)
+    city_id = _create_city(admin, "Библиотечный")
+    device_id, code = _create_screen(admin, "Касса-либ", city_id)
+    resp = admin.post(
+        "/publish",
+        data={"library": [str(media_id)], "city": [str(city_id)],
+              "display_seconds": "8"},
+        follow_redirects=False,
+    )
+    assert "/posters" in resp.headers["location"]
+    assert "err" not in resp.headers["location"]
+
+    headers = _register_agent(client, code)
+    manifest = client.get("/api/agent/manifest", headers=headers).json()
+    assert len(manifest["items"]) == 1
+    assert manifest["items"][0]["sha256"] == \
+        (lambda: __import__("hashlib").sha256(_png_bytes("teal")).hexdigest())()
+
+
+def test_publish_requires_content(admin):
+    city_id = _create_city(admin, "Пустой")
+    resp = admin.post(
+        "/publish",
+        data={"city": [str(city_id)]},  # ни файлов, ни библиотеки
+        follow_redirects=False,
+    )
+    assert "err=" in resp.headers["location"]
+
+
+def test_status_reports_local_panel(admin, client):
+    """Агент сообщает адрес локальной панели — он виден на странице экрана."""
+    city_id = _create_city(admin, "Панельный")
+    device_id, code = _create_screen(admin, "Касса-панель", city_id)
+    headers = _register_agent(client, code)
+    client.post("/api/agent/status", headers=headers, json={
+        "agent_version": "0.6.0", "local_ip": "192.168.1.50", "web_port": 8088,
+    })
+    page = admin.get(f"/screens/{device_id}").text
+    assert "192.168.1.50:8088" in page
+
+
 def test_command_and_screenshot_flow(admin, client):
     """UI ставит команду → агент забирает → шлёт скриншот → он виден в UI."""
     city_id = _create_city(admin, "Челябинск")

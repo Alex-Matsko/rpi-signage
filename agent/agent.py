@@ -32,7 +32,7 @@ import urllib.request
 from datetime import datetime
 from pathlib import Path
 
-AGENT_VERSION = "0.5.0"
+AGENT_VERSION = "0.6.0"
 
 log = logging.getLogger("signage")
 
@@ -139,6 +139,18 @@ class SystemBackend:
     def set_hostname(self, name: str) -> tuple[bool, str]:
         return False, "Смена имени недоступна."
 
+    def get_timezone(self) -> str:
+        try:
+            return time.strftime("%Z")
+        except Exception:
+            return "—"
+
+    def list_timezones(self) -> list[str]:
+        return []
+
+    def set_timezone(self, tz: str) -> tuple[bool, str]:
+        return False, "Смена часового пояса недоступна."
+
 
 class LinuxBackend(SystemBackend):
     """RPi OS Bookworm / Debian / Ubuntu на NUC — через NetworkManager и wpctl."""
@@ -213,6 +225,18 @@ class LinuxBackend(SystemBackend):
         rc, out = _run(["sudo", "-n", "hostnamectl", "set-hostname", name])
         return rc == 0, out
 
+    def get_timezone(self) -> str:
+        rc, out = _run(["timedatectl", "show", "-p", "Timezone", "--value"])
+        return out if rc == 0 and out else "—"
+
+    def list_timezones(self) -> list[str]:
+        rc, out = _run(["timedatectl", "list-timezones"])
+        return out.splitlines() if rc == 0 else []
+
+    def set_timezone(self, tz: str) -> tuple[bool, str]:
+        rc, out = _run(["sudo", "-n", "timedatectl", "set-timezone", tz])
+        return rc == 0, out
+
 
 class MockBackend(SystemBackend):
     """Dev-режим: без реальных системных вызовов, для отладки панели."""
@@ -221,6 +245,7 @@ class MockBackend(SystemBackend):
 
     def __init__(self):
         self._hostname = socket.gethostname()
+        self._tz = "Europe/Moscow"
 
     def network_status(self) -> dict:
         return {
@@ -251,6 +276,18 @@ class MockBackend(SystemBackend):
 
     def set_hostname(self, name: str) -> tuple[bool, str]:
         self._hostname = name
+        return True, ""
+
+    def get_timezone(self) -> str:
+        return self._tz
+
+    def list_timezones(self) -> list[str]:
+        return ["Europe/Moscow", "Europe/Kaliningrad", "Asia/Yekaterinburg",
+                "Asia/Novosibirsk", "Asia/Krasnoyarsk", "Asia/Vladivostok",
+                "UTC"]
+
+    def set_timezone(self, tz: str) -> tuple[bool, str]:
+        self._tz = tz
         return True, ""
 
 
@@ -840,6 +877,64 @@ def self_update(client: ServerClient, server_version: str) -> None:
     os._exit(0)
 
 
+# ------------------------------------------------ хранилище (локальный кеш)
+
+def cache_report(state: State) -> dict:
+    """Сводка по кешу: свободное место и список закешированных файлов."""
+    try:
+        usage = shutil.disk_usage(state.cache_dir)
+        total_mb, free_mb = usage.total // (1024 * 1024), usage.free // (1024 * 1024)
+    except OSError:
+        total_mb = free_mb = 0
+    names = {}
+    with state.lock:
+        for it in state.items:
+            names[it["sha256"]] = it["name"]
+    files = []
+    used = 0
+    if state.cache_dir.exists():
+        for f in sorted(state.cache_dir.iterdir()):
+            if f.is_file() and f.suffix != ".part":
+                size = f.stat().st_size
+                used += size
+                files.append({
+                    "sha256": f.name,
+                    "name": names.get(f.name, "(нет в текущем плейлисте)"),
+                    "size_mb": round(size / (1024 * 1024), 1),
+                    "in_use": f.name in names,
+                })
+    return {"total_mb": total_mb, "free_mb": free_mb,
+            "used_mb": round(used / (1024 * 1024), 1), "files": files}
+
+
+def delete_cached(state: State, sha256: str) -> bool:
+    """Удаляет один файл из кеша (безопасно: только внутри cache_dir)."""
+    if "/" in sha256 or "\\" in sha256 or ".." in sha256:
+        return False
+    target = state.cache_dir / sha256
+    if target.exists() and target.parent == state.cache_dir:
+        target.unlink()
+        with state.lock:
+            state.items = [i for i in state.items if i["sha256"] != sha256]
+            state.cache_done = len(state.items)
+        return True
+    return False
+
+
+def clear_cache(state: State) -> int:
+    """Полностью очищает кеш; действующий контент докачается при следующем опросе."""
+    removed = 0
+    if state.cache_dir.exists():
+        for f in state.cache_dir.iterdir():
+            if f.is_file():
+                f.unlink()
+                removed += 1
+    with state.lock:
+        state.items = []
+        state.cache_done = 0
+    return removed
+
+
 # ---------------------------------------------------------------- циклы
 
 def sync_loop(client: ServerClient, state: State, poll_interval: int,
@@ -964,18 +1059,22 @@ padding:5px 0;border-bottom:1px solid #232d3d;font-size:14px}
 
 _NAV = (
     '<header><b>📺 Signage</b>'
-    '<a href="/">Обзор</a><a href="/network">Сеть</a>'
-    '<a href="/audio">Звук</a><a href="/system">Система</a></header>'
+    '<a href="/">Обзор</a><a href="/server">Сервер</a>'
+    '<a href="/network">Сеть</a><a href="/audio">Звук</a>'
+    '<a href="/storage">Хранилище</a><a href="/system">Система</a></header>'
 )
 
 
 class WebContext:
-    def __init__(self, settings, backend, state, get_status, actions):
+    def __init__(self, settings, backend, state, get_status, actions,
+                 auth_info, bind):
         self.settings = settings
         self.backend = backend
         self.state = state
         self.get_status = get_status   # () -> dict со сводкой агента
         self.actions = actions         # {"restart_agent":fn, "reboot":fn}
+        self.auth_info = auth_info      # () -> dict|None (server, device_id)
+        self.bind = bind                # (server_url, code) -> (ok, msg)
 
 
 def _page(title: str, body: str, flash: str = "", flash_cls: str = "ok") -> bytes:
@@ -1049,8 +1148,10 @@ class _WebHandler(http.server.BaseHTTPRequestHandler):
                 (query.get("err", [""])[0], "err") if "err" in query else ("", "ok")
         routes = {
             "/": self._page_overview,
+            "/server": self._page_server,
             "/network": self._page_network,
             "/audio": self._page_audio,
+            "/storage": self._page_storage,
             "/system": self._page_system,
         }
         handler = routes.get(path)
@@ -1107,6 +1208,24 @@ class _WebHandler(http.server.BaseHTTPRequestHandler):
                 self._redirect("/system?" + urllib.parse.urlencode(
                     {"msg": "Устройство перезагружается."} if ok
                     else {"err": out}))
+            elif path == "/system/timezone":
+                ok, out = self.ctx.backend.set_timezone(
+                    form.get("timezone", "").strip())
+                self._redirect("/system?" + urllib.parse.urlencode(
+                    {"msg": "Часовой пояс изменён."} if ok
+                    else {"err": "Не удалось изменить часовой пояс. " + out}))
+            elif path == "/server/bind":
+                ok, out = self.ctx.bind(form.get("server", "").strip(),
+                                        form.get("code", "").strip())
+                self._redirect("/server?" + urllib.parse.urlencode(
+                    {"msg": out} if ok else {"err": out}))
+            elif path == "/storage/delete":
+                delete_cached(self.ctx.state, form.get("sha256", ""))
+                self._redirect("/storage?msg=Файл+удалён+из+кеша")
+            elif path == "/storage/clear":
+                n = clear_cache(self.ctx.state)
+                self._redirect("/storage?" + urllib.parse.urlencode(
+                    {"msg": f"Кеш очищен, удалено файлов: {n}"}))
             else:
                 self._send(_page("Не найдено", "<p>Нет такого действия.</p>"), 404)
         except Exception as e:  # noqa: BLE001 — панель не должна падать
@@ -1129,6 +1248,75 @@ class _WebHandler(http.server.BaseHTTPRequestHandler):
                      f'<div class="kv"><span class="muted">Имя устройства</span>'
                      f'<span>{html.escape(net["hostname"])}</span></div></div>',
                      flash, cls)
+
+    def _page_server(self, flash, cls):
+        auth = self.ctx.auth_info()
+        if auth:
+            body = (
+                '<div class="card">'
+                f'<div class="kv"><span class="muted">Сервер</span>'
+                f'<span>{html.escape(auth.get("server", "—"))}</span></div>'
+                f'<div class="kv"><span class="muted">ID устройства</span>'
+                f'<span>{html.escape(str(auth.get("device_id", "—")))}</span></div>'
+                '<p class="muted">Устройство привязано к серверу. Афиши и '
+                'команды приходят автоматически.</p></div>'
+                '<div class="card"><h2 style="margin-top:0">Сменить сервер</h2>'
+                '<form method=post action="/server/bind">'
+                '<label>Адрес сервера</label>'
+                '<input name=server placeholder="https://signage.example.com">'
+                '<label>Код подключения (новый экран на сервере)</label>'
+                '<input name=code placeholder="AB12-CD34">'
+                '<button type=submit>Перепривязать</button></form></div>')
+        else:
+            body = (
+                '<div class="card"><p>Устройство ещё не привязано к серверу. '
+                'Создайте экран в панели сервера, получите код подключения и '
+                'введите его здесь.</p>'
+                '<form method=post action="/server/bind">'
+                '<label>Адрес сервера</label>'
+                '<input name=server placeholder="https://signage.example.com" '
+                'autofocus>'
+                '<label>Код подключения</label>'
+                '<input name=code placeholder="AB12-CD34">'
+                '<button type=submit>Привязать к серверу</button>'
+                '</form></div>')
+        return _page("Сервер", body, flash, cls)
+
+    def _page_storage(self, flash, cls):
+        rep = cache_report(self.ctx.state)
+        pct = int(100 * (rep["total_mb"] - rep["free_mb"]) /
+                  rep["total_mb"]) if rep["total_mb"] else 0
+        rows = "".join(
+            f'<tr><td>{html.escape(f["name"])}'
+            f'{" " if f["in_use"] else " <span class=muted>(не в плейлисте)</span>"}'
+            f'</td><td>{f["size_mb"]} МБ</td>'
+            f'<td><form method=post action="/storage/delete" '
+            f'style="margin:0"><input type=hidden name=sha256 '
+            f'value="{html.escape(f["sha256"])}">'
+            f'<button class=sec type=submit>Удалить</button></form></td></tr>'
+            for f in rep["files"]) or \
+            '<tr><td colspan=3 class=muted>Кеш пуст</td></tr>'
+        return _page(
+            "Хранилище",
+            f'<div class="card">'
+            f'<div class="kv"><span class="muted">Всего на диске</span>'
+            f'<span>{rep["total_mb"]} МБ</span></div>'
+            f'<div class="kv"><span class="muted">Свободно</span>'
+            f'<span>{rep["free_mb"]} МБ</span></div>'
+            f'<div class="kv"><span class="muted">Занято кешем афиш</span>'
+            f'<span>{rep["used_mb"]} МБ ({len(rep["files"])} файлов)</span></div>'
+            f'<div class="kv"><span class="muted">Заполнение диска</span>'
+            f'<span>{pct}%</span></div></div>'
+            f'<div class="card"><h2 style="margin-top:0">Кешированный контент</h2>'
+            f'<table><tr><th>Афиша</th><th>Размер</th><th></th></tr>{rows}</table>'
+            f'<form method=post action="/storage/clear" '
+            f'onsubmit="return confirm(\'Очистить весь кеш? Действующие афиши '
+            f'докачаются заново.\')">'
+            f'<button class=danger type=submit>Очистить весь кеш</button></form>'
+            f'<p class="muted" style="margin-bottom:0">Удаление действующей '
+            f'афиши временно освободит место — она докачается при следующем '
+            f'обновлении плейлиста.</p></div>',
+            flash, cls)
 
     def _page_network(self, flash, cls):
         net = self.ctx.backend.network_status()
@@ -1183,8 +1371,23 @@ class _WebHandler(http.server.BaseHTTPRequestHandler):
 
     def _page_system(self, flash, cls):
         net = self.ctx.backend.network_status()
+        cur_tz = self.ctx.backend.get_timezone()
+        tzs = self.ctx.backend.list_timezones()
+        if tzs:
+            tz_opts = "".join(
+                f'<option{" selected" if z == cur_tz else ""}>{html.escape(z)}</option>'
+                for z in tzs)
+            tz_input = f'<select name=timezone>{tz_opts}</select>'
+        else:
+            tz_input = (f'<input name=timezone value="{html.escape(cur_tz)}" '
+                        f'placeholder="Europe/Moscow">')
         return _page(
             "Система",
+            '<div class="card"><h2 style="margin-top:0">Часовой пояс</h2>'
+            f'<p class="muted" style="margin-top:0">Текущий: '
+            f'{html.escape(cur_tz)}</p>'
+            '<form method=post action="/system/timezone">'
+            f'{tz_input}<button type=submit>Сохранить</button></form></div>'
             '<div class="card"><h2 style="margin-top:0">Имя устройства</h2>'
             '<form method=post action="/system/hostname">'
             f'<input name=hostname value="{html.escape(net["hostname"])}">'
@@ -1272,22 +1475,11 @@ def cmd_register(args, state: State) -> int:
 
 
 def cmd_run(args, state: State) -> int:
-    auth = load_auth(state)
-    if auth is None:
-        print("Агент не зарегистрирован. Сначала выполните:\n"
-              f"  {sys.argv[0]} register --server URL --code КОД",
-              file=sys.stderr)
-        return 1
-
     state.cache_dir.mkdir(parents=True, exist_ok=True)
     state.load_saved_manifest()
-    client = ServerClient(auth["server"], auth["token"])
 
-    if args.dev:
-        player = MockPlayer()
-    else:
-        player = MpvPlayer(args.mpv_socket, args.mpv_arg or [])
-
+    player = MockPlayer() if args.dev else MpvPlayer(args.mpv_socket,
+                                                     args.mpv_arg or [])
     placeholder = Path(args.placeholder) if args.placeholder else None
     stop = threading.Event()
 
@@ -1299,7 +1491,49 @@ def cmd_run(args, state: State) -> int:
     signal.signal(signal.SIGTERM, _terminate)
     signal.signal(signal.SIGINT, _terminate)
 
-    # Локальная веб-панель устройства (сеть, звук, система)
+    # Клиентские циклы (опрос сервера) запускаются один раз при наличии
+    # регистрации — либо сразу, либо после привязки через веб-панель.
+    auth_box: dict = {"auth": load_auth(state)}
+    loops_started = threading.Event()
+
+    def start_client_loops(auth: dict) -> None:
+        if loops_started.is_set():
+            return
+        loops_started.set()
+        client = ServerClient(auth["server"], auth["token"])
+        for target, targs in (
+            (sync_loop, (client, state, args.poll_interval, stop,
+                         args.self_update and not args.dev)),
+            (heartbeat_loop, (client, state, stop)),
+            (command_loop, (client, player, args.allow_system, stop)),
+        ):
+            threading.Thread(target=target, args=targs, daemon=True).start()
+        log.info("Подключение к серверу %s активно", auth["server"])
+
+    def bind_action(server: str, code: str):
+        server = server.rstrip("/")
+        if not server or not code:
+            return False, "Укажите адрес сервера и код подключения."
+        try:
+            result = ServerClient(server, None).register(code)
+        except urllib.error.HTTPError as e:
+            return False, ("Неверный или использованный код."
+                           if e.code == 404 else f"Ошибка сервера: HTTP {e.code}")
+        except urllib.error.URLError as e:
+            return False, f"Сервер недоступен: {e.reason}"
+        auth = {"server": server, "token": result["token"],
+                "device_id": result["device_id"]}
+        state.auth_path.parent.mkdir(parents=True, exist_ok=True)
+        state.auth_path.write_text(json.dumps(auth))
+        try:
+            state.auth_path.chmod(0o600)
+        except OSError:
+            pass
+        auth_box["auth"] = auth
+        start_client_loops(auth)
+        return True, f"Привязано к серверу как «{result['name']}»."
+
+    # Локальная веб-панель устройства (работает и до привязки к серверу)
     web = None
     if args.web_port and not args.no_web:
         state.web_port = args.web_port
@@ -1307,10 +1541,11 @@ def cmd_run(args, state: State) -> int:
         backend = make_backend(args.dev)
 
         def _status_summary() -> dict:
+            a = auth_box["auth"]
             return {
                 "Версия агента": AGENT_VERSION,
-                "Сервер": auth["server"],
-                "ID устройства": auth.get("device_id", "?"),
+                "Сервер": a["server"] if a else "не привязан",
+                "ID устройства": a.get("device_id", "?") if a else "—",
                 "Аптайм": f"{read_uptime_sec(state) // 3600} ч",
                 "Температура CPU": (f"{read_temp_c():.0f} °C"
                                     if read_temp_c() is not None else "—"),
@@ -1327,29 +1562,23 @@ def cmd_run(args, state: State) -> int:
                 daemon=True).start()
             return True, ""
 
-        ctx = WebContext(settings, backend, state, _status_summary, {
-            "restart_agent": lambda: os._exit(0),
-            "reboot": _reboot_action,
-        })
+        ctx = WebContext(
+            settings, backend, state, _status_summary,
+            {"restart_agent": lambda: os._exit(0), "reboot": _reboot_action},
+            auth_info=lambda: auth_box["auth"],
+            bind=bind_action,
+        )
         web = LocalWebServer(ctx, args.web_port)
         web.start()
 
-    threads = [
-        threading.Thread(target=sync_loop,
-                         args=(client, state, args.poll_interval, stop,
-                               args.self_update and not args.dev),
-                         daemon=True),
-        threading.Thread(target=heartbeat_loop, args=(client, state, stop),
-                         daemon=True),
-        threading.Thread(target=command_loop,
-                         args=(client, player, args.allow_system, stop),
-                         daemon=True),
-    ]
-    for t in threads:
-        t.start()
+    if auth_box["auth"]:
+        start_client_loops(auth_box["auth"])
+    else:
+        log.warning("Устройство не привязано к серверу. Откройте веб-панель "
+                    "(порт %d) → «Сервер» и введите адрес и код подключения.",
+                    args.web_port)
 
-    log.info("Агент %s запущен (сервер: %s, кеш: %s)",
-             AGENT_VERSION, auth["server"], state.cache_dir)
+    log.info("Агент %s запущен (кеш: %s)", AGENT_VERSION, state.cache_dir)
     playback_loop(player, state, placeholder, stop)
     if web is not None:
         web.stop()

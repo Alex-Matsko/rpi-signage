@@ -6,6 +6,18 @@
   <span class="sub">исходные файлы всех афиш</span>
 </div>
 
+<details class="panel" open>
+  <summary style="cursor:pointer;font-weight:600;padding:4px 0">➕ Загрузить в медиатеку (без публикации)</summary>
+  <form method="post" action="/media/upload" enctype="multipart/form-data"
+        class="inline-form" style="margin-top:10px">
+    <input type="file" name="files" multiple required
+           accept="image/jpeg,image/png,video/mp4" class="grow">
+    <button type="submit" class="btn primary">Загрузить</button>
+  </form>
+  <p class="note">Файлы попадут в библиотеку и станут доступны на странице
+    <a href="/publish">Публикация</a> — можно опубликовать их позже, не загружая заново.</p>
+</details>
+
 <table class="table">
   <tr>
     <th></th><th>Файл</th><th>Тип</th><th>Размер</th><th>Параметры</th>

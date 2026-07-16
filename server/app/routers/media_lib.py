@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
@@ -10,6 +10,46 @@ from ..templating import templates
 from ..utils import redirect
 
 router = APIRouter()
+
+
+@router.post("/media/upload")
+def upload_to_library(
+    files: list[UploadFile],
+    user: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    """Загрузка файлов в медиатеку без создания афиш (просто в библиотеку)."""
+    added, errors, transcoding = 0, [], 0
+    to_enqueue = []
+    for upload in files:
+        if not upload.filename:
+            continue
+        try:
+            attrs = media.save_upload(upload)
+        except media.MediaError as e:
+            errors.append(f"{upload.filename}: {e}")
+            continue
+        mf = db.query(MediaFile).filter(
+            MediaFile.sha256 == attrs["sha256"]).first()
+        if mf is None:
+            mf = MediaFile(**attrs)
+            if mf.kind == "video" and not mf.compatible:
+                mf.transcode_status = "pending"
+            db.add(mf)
+            db.flush()
+            added += 1
+            if mf.transcode_status == "pending":
+                transcoding += 1
+                to_enqueue.append(mf.id)
+    db.commit()
+    for mid in to_enqueue:
+        worker.enqueue(mid)
+    if not added and errors:
+        return redirect("/media", err="; ".join(errors))
+    msg = f"В медиатеку добавлено файлов: {added}."
+    if transcoding:
+        msg += f" В очереди на транскодирование: {transcoding}."
+    return redirect("/media", msg=msg, err="; ".join(errors) or None)
 
 
 @router.post("/media/{media_id}/transcode")

@@ -19,8 +19,9 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [[ -z "$SERVER" || -z "$CODE" ]]; then
-  echo "Использование: install.sh --server URL --code КОД" >&2
+if [[ -z "$SERVER" ]]; then
+  echo "Использование: install.sh --server URL [--code КОД] [--web-password ПАРОЛЬ]" >&2
+  echo "Без --code устройство можно привязать позже через веб-панель (:8088)." >&2
   exit 1
 fi
 if [[ "$(id -u)" -ne 0 ]]; then
@@ -59,15 +60,19 @@ echo "==> Разрешаю управление системой из панел
 # управлять NetworkManager без пароля (для кнопок в панели/интерфейсе).
 cat > /etc/sudoers.d/signage <<'SUDO'
 signage ALL=(root) NOPASSWD: /sbin/reboot, /usr/sbin/reboot, \
-  /usr/bin/hostnamectl, /usr/bin/nmcli
+  /usr/bin/hostnamectl, /usr/bin/nmcli, /usr/bin/timedatectl
 SUDO
 chmod 440 /etc/sudoers.d/signage
 # Разрешаем пользователю signage управлять NetworkManager напрямую
 usermod -aG netdev signage 2>/dev/null || true
 
-echo "==> Регистрирую устройство…"
-sudo -u signage python3 /opt/signage/agent.py \
-  --state-dir /var/lib/signage register --server "$SERVER" --code "$CODE"
+if [[ -n "$CODE" ]]; then
+  echo "==> Регистрирую устройство…"
+  sudo -u signage python3 /opt/signage/agent.py \
+    --state-dir /var/lib/signage register --server "$SERVER" --code "$CODE"
+else
+  echo "==> Код не задан — привяжете устройство позже через веб-панель :8088."
+fi
 
 if [[ -n "$WEB_PASSWORD" ]]; then
   echo "==> Задаю пароль локальной веб-панели…"

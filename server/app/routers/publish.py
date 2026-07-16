@@ -1,7 +1,7 @@
 """Публикация афиш одним процессом: файлы + расписание + города/экраны."""
 import re
 
-from fastapi import APIRouter, Depends, Form, Request, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
 from sqlalchemy.orm import Session
 
 from .. import media, worker
@@ -42,17 +42,23 @@ def publish_page(
     devices_by_city = {
         c.id: sorted(c.devices, key=lambda d: d.name) for c in cities
     }
+    library = (
+        db.query(MediaFile).order_by(MediaFile.created_at.desc()).limit(60).all()
+        if user.is_admin else []
+    )
     return templates.TemplateResponse(request, "publish.html", {
         "user": user,
         "cities": cities,
         "devices_by_city": devices_by_city,
+        "library": library,
     })
 
 
 @router.post("")
 def publish(
     request: Request,
-    files: list[UploadFile],
+    files: list[UploadFile] = File(default=[]),
+    library: list[int] = Form([]),
     starts_at: str = Form(""),
     expires_at: str = Form(""),
     daily_from: str = Form(""),
@@ -72,34 +78,15 @@ def publish(
     ]
     if not city_ids and not device_ids:
         return redirect("/publish", err="Выберите хотя бы один город или экран.")
-    if not files or all(not f.filename for f in files):
-        return redirect("/publish", err="Добавьте хотя бы один файл.")
+    has_files = files and any(f.filename for f in files)
+    if not has_files and not library:
+        return redirect(
+            "/publish",
+            err="Добавьте файлы или выберите афиши из медиатеки.")
 
-    created, transcoding, errors = [], 0, []
-    to_enqueue = []
-    for upload in files:
-        if not upload.filename:
-            continue
-        try:
-            attrs = media.save_upload(upload)
-        except media.MediaError as e:
-            errors.append(f"{upload.filename}: {e}")
-            continue
-
-        mf = db.query(MediaFile).filter(
-            MediaFile.sha256 == attrs["sha256"]).first()
-        if mf is None:
-            mf = MediaFile(**attrs)
-            if mf.kind == "video" and not mf.compatible:
-                mf.transcode_status = "pending"
-            db.add(mf)
-            db.flush()
-        if mf.transcode_status == "pending":
-            transcoding += 1
-            to_enqueue.append(mf.id)
-
+    def make_poster(mf: MediaFile, name: str) -> None:
         poster = Poster(
-            name=(upload.filename or "Афиша").rsplit(".", 1)[0],
+            name=name,
             media_id=mf.id,
             display_seconds=max(1, display_seconds),
             starts_at=parse_dt_local(starts_at),
@@ -116,6 +103,35 @@ def publish(
             poster.targets.append(PosterTarget(device_id=did))
         db.add(poster)
         created.append(poster.name)
+
+    created, transcoding, errors = [], 0, []
+    to_enqueue = []
+
+    for upload in files or []:
+        if not upload.filename:
+            continue
+        try:
+            attrs = media.save_upload(upload)
+        except media.MediaError as e:
+            errors.append(f"{upload.filename}: {e}")
+            continue
+        mf = db.query(MediaFile).filter(
+            MediaFile.sha256 == attrs["sha256"]).first()
+        if mf is None:
+            mf = MediaFile(**attrs)
+            if mf.kind == "video" and not mf.compatible:
+                mf.transcode_status = "pending"
+            db.add(mf)
+            db.flush()
+        if mf.transcode_status == "pending":
+            transcoding += 1
+            to_enqueue.append(mf.id)
+        make_poster(mf, (upload.filename or "Афиша").rsplit(".", 1)[0])
+
+    # Из медиатеки (по id уже загруженных файлов)
+    if library:
+        for mf in db.query(MediaFile).filter(MediaFile.id.in_(library)).all():
+            make_poster(mf, mf.orig_name.rsplit(".", 1)[0])
 
     db.commit()
     for mid in set(to_enqueue):
