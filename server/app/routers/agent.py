@@ -41,7 +41,10 @@ def build_manifest(device: Device) -> dict:
                 "sha256": m.sha256,
                 "size": m.size_bytes,
                 "url": f"/api/agent/media/{m.sha256}",
-                "duration": poster.display_seconds if m.kind == "image" else None,
+                "duration": (
+                    poster.display_seconds if m.kind == "image"
+                    else m.duration_sec
+                ),
                 "starts_at": poster.starts_at.isoformat() if poster.starts_at else None,
                 "expires_at": poster.expires_at.isoformat() if poster.expires_at else None,
             })

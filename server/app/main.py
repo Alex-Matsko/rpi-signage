@@ -88,6 +88,13 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404)
         return FileResponse(path, media_type="text/x-python")
 
+    @app.get("/placeholder.png", include_in_schema=False)
+    def placeholder_png():
+        path = agent_dir / "placeholder.png"
+        if not path.exists():
+            raise HTTPException(status_code=404)
+        return FileResponse(path, media_type="image/png")
+
     app.include_router(auth.router)
     app.include_router(dashboard.router)
     app.include_router(posters.router)

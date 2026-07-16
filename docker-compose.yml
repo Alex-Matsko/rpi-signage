@@ -1,0 +1,18 @@
+services:
+  server:
+    build: .
+    container_name: rpi-signage-server
+    ports:
+      - "${SIGNAGE_PORT:-8080}:8000"
+    environment:
+      ADMIN_USER: ${ADMIN_USER:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?Задайте ADMIN_PASSWORD (например, в файле .env)}
+      TZ: ${TZ:-Europe/Moscow}
+      SIGNAGE_MAX_UPLOAD_MB: ${SIGNAGE_MAX_UPLOAD_MB:-1024}
+      SIGNAGE_POLL_INTERVAL: ${SIGNAGE_POLL_INTERVAL:-60}
+    volumes:
+      - signage-data:/data
+    restart: unless-stopped
+
+volumes:
+  signage-data:

@@ -1,0 +1,16 @@
+[Unit]
+Description=RPi Signage Agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=signage
+SupplementaryGroups=video render input
+ExecStart=/usr/bin/python3 /opt/signage/agent.py run --placeholder /opt/signage/placeholder.png
+Restart=always
+RestartSec=5
+Environment=SIGNAGE_STATE_DIR=/var/lib/signage
+
+[Install]
+WantedBy=multi-user.target
