@@ -370,6 +370,23 @@ def test_resync_command(admin, client):
     assert any(c["kind"] == "resync" for c in cmds)
 
 
+def test_upload_self_heals_missing_media_dir(admin):
+    """Загрузка не падает, если каталог media исчез (пересоздание тома и т.п.)."""
+    import shutil as _sh
+
+    from app import config
+    _sh.rmtree(config.MEDIA_DIR, ignore_errors=True)
+    assert not config.MEDIA_DIR.exists()
+    resp = admin.post(
+        "/media/upload",
+        files=[("files", ("heal.png", _png_bytes("olive"), "image/png"))],
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+    assert "err" not in resp.headers["location"]
+    assert config.MEDIA_DIR.exists()  # каталог восстановлен
+
+
 def test_media_preview_inline(admin):
     """Просмотр отдаёт файл inline (для встроенного плеера), без attachment."""
     import hashlib

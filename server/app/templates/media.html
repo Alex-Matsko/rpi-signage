@@ -76,9 +76,18 @@
         ? `Загрузка… ${pct}% (${fmtSize(ev.loaded)} из ${fmtSize(ev.total)})`
         : 'Обработка на сервере…';
     };
-    xhr.onload = () => { window.location = '/media'; };
+    xhr.onload = () => {
+      // responseURL несёт ?msg=/?err= с сервера — покажем результат
+      if (xhr.status >= 200 && xhr.status < 400) {
+        window.location = xhr.responseURL || '/media';
+      } else {
+        progtxt.textContent = 'Ошибка сервера: HTTP ' + xhr.status +
+          '. Файл не загружен — проверьте формат и место на диске.';
+        upbtn.disabled = false;
+      }
+    };
     xhr.onerror = () => {
-      progtxt.textContent = 'Ошибка загрузки'; upbtn.disabled = false;
+      progtxt.textContent = 'Ошибка сети при загрузке'; upbtn.disabled = false;
     };
     xhr.send(new FormData(form));
   });

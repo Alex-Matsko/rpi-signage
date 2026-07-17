@@ -43,6 +43,10 @@ def save_upload(upload: UploadFile) -> dict:
             "Поддерживаются JPEG, PNG и MP4."
         )
 
+    # Самовосстановление: каталоги данных могли пропасть (пересоздание тома,
+    # проблемы с bind-mount). Гарантируем их наличие перед записью.
+    config.ensure_dirs()
+
     max_bytes = config.MAX_UPLOAD_MB * 1024 * 1024
     sha = hashlib.sha256()
     size = 0
