@@ -250,6 +250,19 @@ dialog.modal::backdrop { background: rgba(10, 15, 22, .55); }
 dialog.modal h3 { margin: 0 0 8px; }
 dialog.modal input[type=text] { width: 100%; margin-top: 10px; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
+dialog.preview-modal { width: min(760px, 94vw); }
+dialog.preview-modal .right { margin-left: auto; }
+
+/* Прогресс-бары (загрузка файлов, кеш экрана) */
+.progress { display: flex; flex-direction: column; gap: 4px; margin-top: 4px; }
+.progress-bar { height: 8px; border-radius: 5px; background: var(--surface-2); overflow: hidden; }
+.progress-bar i { display: block; height: 100%; width: 0; background: var(--accent);
+  border-radius: 5px; transition: width .3s ease; }
+
+/* Кнопки/строки копирования */
+.copy-btn { vertical-align: middle; }
+.copy-row { display: flex; gap: 8px; align-items: flex-start; }
+.copy-row pre { flex: 1; margin: 0; }
 
 .mini-thumb { width: 56px; height: 38px; object-fit: cover; border-radius: 5px; background: var(--surface-2); flex-shrink: 0; }
 

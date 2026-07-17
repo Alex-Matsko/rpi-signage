@@ -17,7 +17,11 @@
                accept="image/jpeg,image/png,video/mp4">
       </label>
       <div class="file-list" id="flist"></div>
-      <button type="submit" class="btn primary" style="margin-top:12px">Загрузить</button>
+      <div class="progress" id="prog" hidden>
+        <div class="progress-bar"><i id="progbar"></i></div>
+        <span class="small muted" id="progtxt">Загрузка… 0%</span>
+      </div>
+      <button type="submit" class="btn primary" id="upbtn" style="margin-top:12px">Загрузить</button>
     </form>
     <p class="note">Файлы попадут в библиотеку и станут доступны на странице
       <a href="/publish">Публикация</a> — можно опубликовать их позже, не загружая заново.</p>
@@ -28,6 +32,11 @@
   const input = document.getElementById('files');
   const dz = document.getElementById('dz');
   const flist = document.getElementById('flist');
+  const form = document.getElementById('upform');
+  const prog = document.getElementById('prog');
+  const progbar = document.getElementById('progbar');
+  const progtxt = document.getElementById('progtxt');
+  const upbtn = document.getElementById('upbtn');
   function fmtSize(n) {
     if (n > 1048576) return (n / 1048576).toFixed(1) + ' МБ';
     return Math.round(n / 1024) + ' КБ';
@@ -51,7 +60,52 @@
     e.preventDefault(); dz.classList.remove('drag');
   }));
   dz.addEventListener('drop', e => { input.files = e.dataTransfer.files; renderFiles(); });
+
+  // Загрузка через XHR с индикатором прогресса
+  form.addEventListener('submit', e => {
+    if (!input.files.length) return;
+    e.preventDefault();
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', '/media/upload');
+    prog.hidden = false; upbtn.disabled = true;
+    xhr.upload.onprogress = ev => {
+      if (!ev.lengthComputable) return;
+      const pct = Math.round(ev.loaded / ev.total * 100);
+      progbar.style.width = pct + '%';
+      progtxt.textContent = pct < 100
+        ? `Загрузка… ${pct}% (${fmtSize(ev.loaded)} из ${fmtSize(ev.total)})`
+        : 'Обработка на сервере…';
+    };
+    xhr.onload = () => { window.location = '/media'; };
+    xhr.onerror = () => {
+      progtxt.textContent = 'Ошибка загрузки'; upbtn.disabled = false;
+    };
+    xhr.send(new FormData(form));
+  });
+
+  // Встроенный просмотр видео/изображения
+  function preview(id, kind, name) {
+    const dlg = document.getElementById('previewDlg');
+    const box = document.getElementById('previewBox');
+    document.getElementById('previewName').textContent = name;
+    box.innerHTML = kind === 'video'
+      ? `<video src="/media/${id}/preview" controls autoplay style="width:100%;border-radius:8px" preload="metadata"></video>`
+      : `<img src="/media/${id}/preview" alt="" style="width:100%;border-radius:8px">`;
+    dlg.showModal();
+  }
+  function closePreview() {
+    document.getElementById('previewBox').innerHTML = '';  // остановить видео
+    document.getElementById('previewDlg').close();
+  }
 </script>
+
+<dialog id="previewDlg" class="modal preview-modal">
+  <div class="p-head" style="border:0;padding:0 0 10px">
+    <h3 id="previewName" style="margin:0"></h3>
+    <button type="button" class="btn small right" onclick="closePreview()">Закрыть</button>
+  </div>
+  <div id="previewBox"></div>
+</dialog>
 
 <table class="table">
   <tr>
@@ -78,6 +132,8 @@
     <td class="small">{{ f.created_at|dt }}</td>
     <td>
       <div class="row-actions">
+        <button type="button" class="btn"
+                onclick="preview({{ f.id }}, '{{ f.kind }}', '{{ f.orig_name|e }}')">▶ Просмотр</button>
         {% if f.kind == 'video' and not f.compatible and f.transcode_status in ('failed', 'none') %}
         <form method="post" action="/media/{{ f.id }}/transcode">
           <button type="submit" class="btn">Транскодировать</button>

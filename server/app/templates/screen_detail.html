@@ -9,15 +9,41 @@
 </div>
 
 {% if device.pairing_code %}
+{% set install_cmd = 'curl -fsSL ' ~ request.base_url ~ 'install.sh | sudo bash -s -- --server ' ~ request.base_url ~ ' --code ' ~ device.pairing_code %}
 <div class="panel">
   <div class="p-body">
-    <h2 style="margin-top:0">Код подключения: <span class="pairing-code">{{ device.pairing_code }}</span></h2>
-    <p>Установите агента на Raspberry Pi одной командой:</p>
-    <pre>curl -fsSL {{ request.base_url }}install.sh | sudo bash -s -- \
-  --server {{ request.base_url }} --code {{ device.pairing_code }}</pre>
-    <p class="muted small">Код одноразовый: после подключения агента он исчезнет.</p>
+    <h2 style="margin-top:0">Код подключения:
+      <span class="pairing-code" id="paircode">{{ device.pairing_code }}</span>
+      <button type="button" class="btn small copy-btn"
+              onclick="copyText('{{ device.pairing_code }}', this)" title="Копировать код">📋 Копировать код</button>
+    </h2>
+    <p>Установите агента на устройство одной командой:</p>
+    <div class="copy-row">
+      <pre id="installcmd">{{ install_cmd }}</pre>
+      <button type="button" class="btn small copy-btn"
+              onclick="copyText(document.getElementById('installcmd').textContent, this)"
+              title="Копировать команду">📋 Копировать команду</button>
+    </div>
+    <p class="muted small">Код одноразовый: после подключения агента он исчезнет.
+      Команду можно вставить в устройство или в раздел «Сервер» его веб-панели.</p>
   </div>
 </div>
+<script>
+  function copyText(text, btn) {
+    navigator.clipboard.writeText(text).then(() => {
+      const old = btn.textContent;
+      btn.textContent = '✓ Скопировано';
+      setTimeout(() => { btn.textContent = old; }, 1500);
+    }).catch(() => {
+      // Резерв для http/старых браузеров
+      const ta = document.createElement('textarea');
+      ta.value = text; document.body.appendChild(ta); ta.select();
+      try { document.execCommand('copy'); btn.textContent = '✓ Скопировано';
+            setTimeout(() => location.reload(), 1200); } catch (e) {}
+      ta.remove();
+    });
+  }
+</script>
 {% endif %}
 
 {% set online = device.is_online(offline_after) %}
@@ -32,8 +58,14 @@
     {{ device.current_name or '—' }}
     {% if device.current_since %}<span class="muted small">с {{ device.current_since|dt }}</span>{% endif %}
   </div>
-  <div><span class="label">Кеш</span>
-    {{ (device.cache_done or 0) ~ ' из ' ~ device.cache_total ~ ' файлов' if device.cache_total is not none else '—' }}</div>
+  <div><span class="label">Кеш контента</span>
+    {% if device.cache_total %}
+      {% set done = device.cache_done or 0 %}
+      {% set pct = (100 * done / device.cache_total)|int %}
+      <div class="progress"><div class="progress-bar"><i style="width:{{ pct }}%"></i></div>
+        <span class="small">{{ done }} из {{ device.cache_total }}{{ ' — загрузка…' if done < device.cache_total else ' ✓' }}</span></div>
+    {% else %}—{% endif %}
+  </div>
   <div><span class="label">Версия агента</span>{{ device.agent_version or '—' }}
     {% if server_agent_version and device.agent_version
           and device.agent_version != server_agent_version %}
@@ -68,6 +100,21 @@
     </form>
   </div>
 </div>
+
+{% if device.token_hash %}
+<div class="panel"><div class="p-body inline-form" style="justify-content:space-between">
+  <div>
+    <b>Отправить афиши на экран сейчас</b>
+    <div class="muted small">Экран сам обновляется каждые ~60 сек. Кнопка заставляет
+      его немедленно перечитать список афиш и докачать недостающее — прогресс
+      виден в поле «Кеш контента» выше.</div>
+  </div>
+  <form method="post" action="/screens/{{ device.id }}/command">
+    <input type="hidden" name="kind" value="resync">
+    <button type="submit" class="btn primary">⟳ Отправить сейчас</button>
+  </form>
+</div></div>
+{% endif %}
 
 <h2>Ротация экрана ({{ manifest['items']|length }})</h2>
 <table class="table">

@@ -94,6 +94,7 @@ COMMAND_STATUS = {
 templates.env.globals["COMMAND_STATUS"] = COMMAND_STATUS
 
 COMMAND_KINDS = {
+    "resync": "Отправка афиш",
     "screenshot": "Скриншот",
     "restart_agent": "Перезапуск агента",
     "reboot": "Перезагрузка RPi",

@@ -130,3 +130,20 @@ def download(
     if not path.exists():
         raise HTTPException(status_code=404)
     return FileResponse(path, media_type=mf.mime, filename=mf.orig_name)
+
+
+@router.get("/media/{media_id}/preview")
+def preview(
+    media_id: int,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    """Отдаёт файл inline для встроенного плеера в браузере (не скачивание)."""
+    mf = db.get(MediaFile, media_id)
+    if mf is None:
+        raise HTTPException(status_code=404)
+    path = media.media_path(mf.sha256)
+    if not path.exists():
+        raise HTTPException(status_code=404)
+    # Без filename → Content-Disposition inline: браузер проигрывает, не качает
+    return FileResponse(path, media_type=mf.mime)

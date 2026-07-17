@@ -36,7 +36,8 @@
     <td>
       {% if d.token_hash is none and d.pairing_code %}
         <code class="pair">{{ d.pairing_code }}</code>
-        <span class="muted small">← введите при установке</span>
+        <button type="button" class="btn small copy-btn"
+                onclick="copyCode('{{ d.pairing_code }}', this)" title="Копировать код">📋</button>
       {% elif online %}
         <span class="chip ok"><span class="dot"></span>online</span>
       {% else %}
@@ -113,5 +114,13 @@
 
 <p class="note">Код в колонке «Статус» — одноразовый код подключения нового
   экрана: укажите его при установке агента на устройство (или введите
-  в его локальной веб-панели).</p>
+  в его локальной веб-панели). 📋 — скопировать код.</p>
+<script>
+  function copyCode(text, btn) {
+    navigator.clipboard.writeText(text).then(() => {
+      const old = btn.textContent; btn.textContent = '✓';
+      setTimeout(() => { btn.textContent = old; }, 1200);
+    }).catch(() => {});
+  }
+</script>
 {% endblock %}

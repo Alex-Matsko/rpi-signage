@@ -24,6 +24,7 @@ from ..utils import redirect
 router = APIRouter()
 
 COMMAND_LABELS = {
+    "resync": "Отправить афиши сейчас",
     "screenshot": "Сделать скриншот",
     "restart_agent": "Перезапустить агент",
     "reboot": "Перезагрузить Raspberry Pi",

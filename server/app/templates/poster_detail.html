@@ -23,8 +23,13 @@
 
 <div class="wizard">
   <div>
+    {% if p.media.kind == 'video' %}
+    <video class="preview-lg" src="/media/{{ p.media.id }}/preview" controls
+           preload="metadata" poster="/thumbs/{{ p.media.sha256 }}.jpg"></video>
+    {% else %}
     <img class="preview-lg" src="/thumbs/{{ p.media.sha256 }}.jpg" alt=""
          onerror="this.style.display='none'">
+    {% endif %}
     <p class="muted small">
       {{ p.media.orig_name }} · {{ p.media.size_bytes|filesize }} ·
       {{ p.media.width }}×{{ p.media.height }}

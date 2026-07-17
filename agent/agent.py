@@ -33,7 +33,7 @@ import urllib.request
 from datetime import datetime
 from pathlib import Path
 
-AGENT_VERSION = "0.8.0"
+AGENT_VERSION = "0.10.0"
 
 log = logging.getLogger("signage")
 
@@ -44,7 +44,11 @@ HEARTBEAT_SEC = 30
 DOWNLOAD_CHUNK = 256 * 1024
 MPV_ARGS = [
     "--idle=yes", "--fullscreen", "--no-terminal", "--no-osc", "--no-osd-bar",
-    "--keep-open=no", "--loop-file=no", "--hwdec=auto-safe",
+    # keep-open=yes удерживает последний кадр до загрузки следующего файла,
+    # поэтому при смене контента не мелькает чёрный экран/консоль.
+    "--keep-open=yes", "--keep-open-pause=no", "--loop-file=no",
+    "--hwdec=auto-safe", "--force-window=yes", "--background=color",
+    "--background-color=#000000", "--cursor-autohide=always",
     "--really-quiet", "--no-input-default-bindings", "--osd-level=0",
 ]
 
@@ -375,6 +379,17 @@ class State:
         self.started = time.monotonic()
         self.settings_path = state_dir / "settings.json"
         self.web_port = 0  # 0 = панель выключена
+        # Момент последнего успешного обмена с сервером (для индикатора связи)
+        self.last_server_ok: float = 0.0
+        # Немедленный повторный опрос манифеста (кнопка «отправить афиши»)
+        self.resync = threading.Event()
+
+    def note_server_ok(self) -> None:
+        self.last_server_ok = time.time()
+
+    def is_connected(self, within_sec: float = 150.0) -> bool:
+        return self.last_server_ok > 0 and \
+            (time.time() - self.last_server_ok) < within_sec
 
     def load_saved_manifest(self) -> None:
         if self.manifest_path.exists():
@@ -825,7 +840,7 @@ def run_terminal(client: "ServerClient", session_id: str,
         log.info("Терминал %s закрыт", session_id[:8])
 
 
-def handle_command(client: "ServerClient", player, cmd: dict,
+def handle_command(client: "ServerClient", player, state: State, cmd: dict,
                    allow_system: bool, stop: threading.Event) -> None:
     kind = cmd["kind"]
     cid = cmd["id"]
@@ -834,6 +849,10 @@ def handle_command(client: "ServerClient", player, cmd: dict,
             png = player.screenshot()
             client.upload_screenshot(png)
             client.command_result(cid, "done", "Скриншот загружен")
+
+        elif kind == "resync":
+            state.resync.set()  # мгновенно перечитать манифест и докачать
+            client.command_result(cid, "done", "Обновление контента запущено")
 
         elif kind == "restart_agent":
             client.command_result(cid, "done", "Агент перезапускается")
@@ -870,18 +889,19 @@ def handle_command(client: "ServerClient", player, cmd: dict,
             pass
 
 
-def command_loop(client: "ServerClient", player, allow_system: bool,
-                 stop: threading.Event) -> None:
+def command_loop(client: "ServerClient", player, state: State,
+                 allow_system: bool, stop: threading.Event) -> None:
     """Долгий опрос команд управления экраном."""
     while not stop.is_set():
         try:
             cmds = client.get_commands()
+            state.note_server_ok()
         except Exception as e:
             log.debug("Опрос команд не удался: %s", e)
             stop.wait(timeout=5)
             continue
         for cmd in cmds:
-            handle_command(client, player, cmd, allow_system, stop)
+            handle_command(client, player, state, cmd, allow_system, stop)
 
 
 # ---------------------------------------------------------------- метрики
@@ -1041,9 +1061,13 @@ def sync_loop(client: ServerClient, state: State, poll_interval: int,
                 last_version = version
             state.manifest_path.write_text(
                 json.dumps(manifest, ensure_ascii=False))
+            state.note_server_ok()
         except Exception as e:
             log.warning("Сервер недоступен (%s) — работаю из кеша", e)
-        stop.wait(timeout=poll_interval)
+        # Ждём planовый интервал ИЛИ немедленный запрос (кнопка «отправить»)
+        state.resync.clear()
+        if state.resync.wait(timeout=poll_interval):
+            log.info("Получен запрос на немедленное обновление контента")
 
 
 def heartbeat_loop(client: ServerClient, state: State,
@@ -1064,6 +1088,7 @@ def heartbeat_loop(client: ServerClient, state: State,
             }
         try:
             client.send_status(payload)
+            state.note_server_ok()
         except Exception as e:
             log.debug("Heartbeat не доставлен: %s", e)
         state.wake.clear()
@@ -1575,7 +1600,7 @@ def cmd_run(args, state: State) -> int:
             (sync_loop, (client, state, args.poll_interval, stop,
                          args.self_update and not args.dev)),
             (heartbeat_loop, (client, state, stop)),
-            (command_loop, (client, player, args.allow_system, stop)),
+            (command_loop, (client, player, state, args.allow_system, stop)),
         ):
             threading.Thread(target=target, args=targs, daemon=True).start()
         log.info("Подключение к серверу %s активно", auth["server"])
@@ -1611,7 +1636,14 @@ def cmd_run(args, state: State) -> int:
 
         def _status_summary() -> dict:
             a = auth_box["auth"]
+            if not a:
+                conn = "не привязан"
+            elif state.is_connected():
+                conn = "✅ подключён"
+            else:
+                conn = "⛔ нет связи"
             return {
+                "Связь с сервером": conn,
                 "Версия агента": AGENT_VERSION,
                 "Сервер": a["server"] if a else "не привязан",
                 "ID устройства": a.get("device_id", "?") if a else "—",

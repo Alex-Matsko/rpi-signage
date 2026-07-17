@@ -358,6 +358,35 @@ def test_terminal_requires_access(admin, client):
     assert resp.status_code == 401  # плохой токен раньше, чем сессия
 
 
+def test_resync_command(admin, client):
+    """Кнопка «отправить афиши» ставит команду resync, агент её забирает."""
+    city_id = _create_city(admin, "Синхро")
+    device_id, code = _create_screen(admin, "Касса-синхро", city_id)
+    headers = _register_agent(client, code)
+    resp = admin.post(f"/screens/{device_id}/command",
+                      data={"kind": "resync"}, follow_redirects=False)
+    assert "msg=" in resp.headers["location"]
+    cmds = client.get("/api/agent/commands", headers=headers).json()["commands"]
+    assert any(c["kind"] == "resync" for c in cmds)
+
+
+def test_media_preview_inline(admin):
+    """Просмотр отдаёт файл inline (для встроенного плеера), без attachment."""
+    import hashlib
+    content = _png_bytes("navy")  # уникальный цвет → уникальный sha256
+    sha = hashlib.sha256(content).hexdigest()
+    admin.post(
+        "/media/upload",
+        files=[("files", ("pv.png", content, "image/png"))],
+        follow_redirects=False,
+    )
+    with SessionLocal() as db:
+        mf = db.query(MediaFile).filter(MediaFile.sha256 == sha).one()
+    resp = admin.get(f"/media/{mf.id}/preview")
+    assert resp.status_code == 200
+    assert "attachment" not in resp.headers.get("content-disposition", "")
+
+
 def test_transcode_incompatible_video(admin):
     """Несовместимое видео транскодируется воркером в H.264."""
     import shutil as _shutil

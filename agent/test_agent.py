@@ -268,3 +268,30 @@ def test_panel_restart_redirect_cyrillic(panel):
     status, _ = _req(port, "POST", "/system/password",
                      body="user=admin&password=short&password2=short")
     assert status == 303
+
+
+# ------------------------------------------------ v0.10: связь, resync
+
+def test_connection_status(tmp_path):
+    st = agent.State(tmp_path / "s")
+    assert not st.is_connected()      # ещё не было связи
+    st.note_server_ok()
+    assert st.is_connected()
+    st.last_server_ok = time.time() - 10_000  # давно
+    assert not st.is_connected()
+
+
+def test_resync_command_sets_event(tmp_path):
+    st = agent.State(tmp_path / "s")
+    assert not st.resync.is_set()
+
+    class FakeClient:
+        def __init__(self): self.results = []
+        def command_result(self, cid, status, result=""):
+            self.results.append((cid, status))
+
+    client = FakeClient()
+    agent.handle_command(client, agent.MockPlayer(), st,
+                         {"id": 1, "kind": "resync"}, False, __import__("threading").Event())
+    assert st.resync.is_set()
+    assert client.results == [(1, "done")]
