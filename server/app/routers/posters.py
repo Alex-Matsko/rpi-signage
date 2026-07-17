@@ -8,7 +8,6 @@ from .. import config
 from ..db import get_db
 from ..deps import check_city_access, current_user, visible_cities
 from ..models import Device, Poster, PosterTarget, User, now
-from ..routers.publish import parse_daily, weekdays_mask
 from ..templating import templates
 from ..utils import parse_dt_local, redirect
 
@@ -111,9 +110,6 @@ def update_poster(
     display_seconds: int = Form(10),
     starts_at: str = Form(""),
     expires_at: str = Form(""),
-    daily_from: str = Form(""),
-    daily_until: str = Form(""),
-    wd: list[int] = Form([]),
     city: list[int] = Form([]),
     device: list[int] = Form([]),
     user: User = Depends(current_user),
@@ -126,9 +122,6 @@ def update_poster(
     poster.display_seconds = max(1, display_seconds)
     poster.starts_at = parse_dt_local(starts_at)
     poster.expires_at = parse_dt_local(expires_at)
-    poster.daily_from = parse_daily(daily_from)
-    poster.daily_until = parse_daily(daily_until)
-    poster.weekdays_mask = weekdays_mask(wd)
 
     # Назначения: менеджер меняет только в пределах своего города
     allowed = {c.id for c in visible_cities(user, db)}

@@ -6,17 +6,52 @@
   <span class="sub">исходные файлы всех афиш</span>
 </div>
 
-<details class="panel" open>
-  <summary style="cursor:pointer;font-weight:600;padding:4px 0">➕ Загрузить в медиатеку (без публикации)</summary>
-  <form method="post" action="/media/upload" enctype="multipart/form-data"
-        class="inline-form" style="margin-top:10px">
-    <input type="file" name="files" multiple required
-           accept="image/jpeg,image/png,video/mp4" class="grow">
-    <button type="submit" class="btn primary">Загрузить</button>
-  </form>
-  <p class="note">Файлы попадут в библиотеку и станут доступны на странице
-    <a href="/publish">Публикация</a> — можно опубликовать их позже, не загружая заново.</p>
-</details>
+<div class="panel">
+  <div class="p-head"><h3>Загрузить в медиатеку (без публикации)</h3></div>
+  <div class="p-body">
+    <form method="post" action="/media/upload" enctype="multipart/form-data" id="upform">
+      <label class="dropzone" id="dz">
+        <b>Перетащите файлы сюда</b>
+        или нажмите, чтобы выбрать — JPEG, PNG, MP4, сразу несколько
+        <input type="file" name="files" id="files" multiple required
+               accept="image/jpeg,image/png,video/mp4">
+      </label>
+      <div class="file-list" id="flist"></div>
+      <button type="submit" class="btn primary" style="margin-top:12px">Загрузить</button>
+    </form>
+    <p class="note">Файлы попадут в библиотеку и станут доступны на странице
+      <a href="/publish">Публикация</a> — можно опубликовать их позже, не загружая заново.</p>
+  </div>
+</div>
+
+<script>
+  const input = document.getElementById('files');
+  const dz = document.getElementById('dz');
+  const flist = document.getElementById('flist');
+  function fmtSize(n) {
+    if (n > 1048576) return (n / 1048576).toFixed(1) + ' МБ';
+    return Math.round(n / 1024) + ' КБ';
+  }
+  function renderFiles() {
+    flist.innerHTML = '';
+    for (const f of input.files) {
+      const row = document.createElement('div');
+      row.className = 'file-row';
+      const name = document.createElement('span');
+      name.className = 'fname'; name.textContent = f.name;
+      const size = document.createElement('small'); size.textContent = fmtSize(f.size);
+      row.append(name, size); flist.append(row);
+    }
+  }
+  input.addEventListener('change', renderFiles);
+  ['dragover', 'dragenter'].forEach(ev => dz.addEventListener(ev, e => {
+    e.preventDefault(); dz.classList.add('drag');
+  }));
+  ['dragleave', 'drop'].forEach(ev => dz.addEventListener(ev, e => {
+    e.preventDefault(); dz.classList.remove('drag');
+  }));
+  dz.addEventListener('drop', e => { input.files = e.dataTransfer.files; renderFiles(); });
+</script>
 
 <table class="table">
   <tr>

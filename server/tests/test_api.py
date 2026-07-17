@@ -72,8 +72,8 @@ def test_publish_flow(admin, client):
         ],
         data={
             "display_seconds": "7",
-            "daily_from": "08:00", "daily_until": "23:00",
-            "wd": ["0", "1", "2", "3", "4"],
+            "starts_at": "2026-07-17T09:00",
+            "expires_at": "2026-12-31T23:00",
             "city": [str(city_id)],
         },
         follow_redirects=False,
@@ -90,8 +90,7 @@ def test_publish_flow(admin, client):
     assert len(manifest["items"]) == 2
     item = manifest["items"][0]
     assert item["duration"] == 7
-    assert item["daily_from"] == "08:00"
-    assert item["weekdays"] == 31
+    assert item["expires_at"].startswith("2026-12-31")
     assert manifest["agent_version"]
 
     # Скачивание и heartbeat

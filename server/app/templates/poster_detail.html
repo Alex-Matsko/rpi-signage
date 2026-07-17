@@ -47,20 +47,12 @@
           {% else %}
           <input type="hidden" name="display_seconds" value="{{ p.display_seconds }}">
           {% endif %}
-          <label>Начало показа<input type="datetime-local" name="starts_at"
+          <label>Дата начала<input type="datetime-local" name="starts_at"
                  value="{{ p.starts_at.strftime('%Y-%m-%dT%H:%M') if p.starts_at }}"></label>
-          <label>Истекает<input type="datetime-local" name="expires_at"
+          <label>Дата окончания<input type="datetime-local" name="expires_at"
                  value="{{ p.expires_at.strftime('%Y-%m-%dT%H:%M') if p.expires_at }}"></label>
-          <label>Ежедневно с<input type="time" name="daily_from" value="{{ p.daily_from or '' }}"></label>
-          <label>до<input type="time" name="daily_until" value="{{ p.daily_until or '' }}"></label>
         </div>
-        <span class="flabel" style="margin-top:12px">Дни недели (пусто = все)</span>
-        <div class="days">
-          {% for d in WEEKDAY_NAMES %}
-          <label class="day"><input type="checkbox" name="wd" value="{{ loop.index0 }}"
-            {{ 'checked' if p.weekdays_mask and (p.weekdays_mask // (2 ** loop.index0)) % 2 }}><span>{{ d }}</span></label>
-          {% endfor %}
-        </div>
+        <p class="note">Пусто = бессрочно.</p>
       </div>
     </div>
 

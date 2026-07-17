@@ -179,8 +179,9 @@ label { font-size: 13px; }
 .wizard { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, .9fr); gap: 16px; align-items: start; }
 @media (max-width: 980px) { .wizard { grid-template-columns: 1fr; } }
 .dropzone {
+  display: block; width: 100%;
   border: 2px dashed var(--line); border-radius: var(--r);
-  padding: 26px; text-align: center; color: var(--muted);
+  padding: 26px 16px; text-align: center; color: var(--muted);
   cursor: pointer; transition: border-color .15s;
 }
 .dropzone:hover, .dropzone.drag { border-color: var(--accent); color: var(--accent); }
@@ -230,6 +231,25 @@ label { font-size: 13px; }
 code.pair { background: var(--accent-soft); color: var(--accent); border-radius: 5px; padding: 2px 8px; font: 600 12.5px ui-monospace, "SF Mono", Menlo, monospace; letter-spacing: .06em; }
 .row-actions { display: flex; gap: 6px; flex-wrap: wrap; }
 .row-actions form { display: inline; }
+.btn.small { padding: 5px 10px; font-size: 12.5px; }
+
+/* Заголовок панели с действиями справа */
+.p-head .right { margin-left: auto; }
+.p-head h3 { display: flex; align-items: center; gap: 8px; }
+
+/* Добавление экрана внутри города */
+.add-screen { margin-top: 12px; padding-top: 12px; border-top: 1px dashed var(--line); }
+
+/* Модальное окно (нативный <dialog>) */
+dialog.modal {
+  border: 1px solid var(--line); border-radius: var(--r);
+  background: var(--surface); color: var(--ink);
+  padding: 22px; width: min(420px, 92vw); box-shadow: 0 12px 40px rgba(0,0,0,.3);
+}
+dialog.modal::backdrop { background: rgba(10, 15, 22, .55); }
+dialog.modal h3 { margin: 0 0 8px; }
+dialog.modal input[type=text] { width: 100%; margin-top: 10px; }
+.modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
 
 .mini-thumb { width: 56px; height: 38px; object-fit: cover; border-radius: 5px; background: var(--surface-2); flex-shrink: 0; }
 

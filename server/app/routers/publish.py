@@ -1,6 +1,4 @@
-"""Публикация афиш одним процессом: файлы + расписание + города/экраны."""
-import re
-
+"""Публикация афиш одним процессом: файлы + срок + города/экраны."""
 from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
 from sqlalchemy.orm import Session
 
@@ -12,24 +10,6 @@ from ..templating import templates
 from ..utils import parse_dt_local, redirect
 
 router = APIRouter(prefix="/publish")
-
-
-def parse_daily(value: str) -> str | None:
-    """Проверяет время 'HH:MM' из input type=time ('' -> None)."""
-    value = value.strip()
-    if not value:
-        return None
-    if not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", value):
-        return None
-    return value
-
-
-def weekdays_mask(wd: list[int]) -> int | None:
-    mask = 0
-    for day in wd:
-        if 0 <= day <= 6:
-            mask |= 1 << day
-    return mask if 0 < mask < 127 else None  # все 7 дней = без ограничения
 
 
 @router.get("")
@@ -61,9 +41,6 @@ def publish(
     library: list[int] = Form([]),
     starts_at: str = Form(""),
     expires_at: str = Form(""),
-    daily_from: str = Form(""),
-    daily_until: str = Form(""),
-    wd: list[int] = Form([]),
     display_seconds: int = Form(10),
     city: list[int] = Form([]),
     device: list[int] = Form([]),
@@ -91,9 +68,6 @@ def publish(
             display_seconds=max(1, display_seconds),
             starts_at=parse_dt_local(starts_at),
             expires_at=parse_dt_local(expires_at),
-            daily_from=parse_daily(daily_from),
-            daily_until=parse_daily(daily_until),
-            weekdays_mask=weekdays_mask(wd),
             enabled=True,
             created_by=user.id,
         )
