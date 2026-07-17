@@ -5,6 +5,7 @@ venv/
 .pytest_cache/
 .ruff_cache/
 data/
+backups/
 *.db
 *.sqlite3
 .DS_Store

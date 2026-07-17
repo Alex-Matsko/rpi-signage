@@ -66,7 +66,7 @@ ADMIN_PASSWORD='ваш-пароль' docker compose up -d
 ```
 
 Веб-интерфейс: http://localhost:8080 (логин `admin`, порт меняется
-переменной `SIGNAGE_PORT`). Все данные (БД, медиа) — в томе `signage-data`.
+переменной `SIGNAGE_PORT`).
 
 Переменные окружения:
 
@@ -74,12 +74,54 @@ ADMIN_PASSWORD='ваш-пароль' docker compose up -d
 |---|---|---|
 | `ADMIN_USER` / `ADMIN_PASSWORD` | `admin` / — | первый администратор (создаётся при пустой БД) |
 | `SIGNAGE_PORT` | `8080` | внешний порт веб-интерфейса |
+| `SIGNAGE_DATA_PATH` | `./data` | папка с данными (БД, медиа, скриншоты) |
 | `TZ` | `Europe/Moscow` | часовой пояс сервера (должен совпадать с RPi) |
 | `SIGNAGE_MAX_UPLOAD_MB` | `1024` | лимит размера загружаемого файла |
 | `SIGNAGE_POLL_INTERVAL` | `60` | период опроса сервера агентами, сек |
 
 В продакшене поставьте сервер за reverse-proxy с HTTPS (Caddy, nginx,
 Traefik) — токены устройств и cookie не должны ходить открытым текстом.
+
+## Данные и обновление без потери контента
+
+Все данные (БД с экранами и афишами, загруженные медиафайлы, скриншоты,
+ключ сессий) хранятся в папке **`./data`** рядом с `docker-compose.yml`
+(путь меняется переменной `SIGNAGE_DATA_PATH`). Папка переживает пересборку
+образа, `docker compose down` и даже `down -v` — удалить данные можно только
+вручную, удалив саму папку.
+
+**Обновляйтесь безопасным скриптом** — он делает бэкап и не трогает данные:
+
+```bash
+./scripts/update.sh
+```
+
+Эквивалент вручную (данные сохраняются):
+
+```bash
+git pull && docker compose up -d --build
+```
+
+> ⚠️ **Никогда не используйте `docker compose down -v`** для обновления —
+> флаг `-v` удаляет тома. С папкой `./data` это уже не удалит контент, но
+> привычка опасная.
+
+**Резервные копии:**
+
+```bash
+./scripts/backup.sh                              # ./backups/signage-data-*.tar.gz
+./scripts/restore.sh backups/signage-data-*.tar.gz   # восстановить
+```
+
+**Переход со старого именованного тома** (если раньше данные были в
+`signage-data` и вы обновляете конфигурацию): перенесите их в `./data` один раз:
+
+```bash
+docker compose down
+docker run --rm -v rpi-signage_signage-data:/from -v "$(pwd)/data":/to \
+  alpine sh -c 'cp -a /from/. /to/'
+docker compose up -d
+```
 
 ## Подключение экрана (Raspberry Pi / Intel NUC)
 
