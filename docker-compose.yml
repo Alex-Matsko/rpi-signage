@@ -10,6 +10,10 @@ services:
       TZ: ${TZ:-Europe/Moscow}
       SIGNAGE_MAX_UPLOAD_MB: ${SIGNAGE_MAX_UPLOAD_MB:-1024}
       SIGNAGE_POLL_INTERVAL: ${SIGNAGE_POLL_INTERVAL:-60}
+      # Доверять заголовкам X-Forwarded-* от reverse-proxy (HAProxy/nginx),
+      # чтобы ссылки строились как https://<домен>, а не внутренний адрес.
+      # В проде можно сузить до IP прокси вместо "*".
+      FORWARDED_ALLOW_IPS: ${SIGNAGE_FORWARDED_ALLOW_IPS:-*}
     volumes:
       # Данные (БД, медиа, скриншоты, ключ сессий) хранятся в папке на хосте.
       # Это переживает `docker compose down` и даже `down -v` — удалить данные

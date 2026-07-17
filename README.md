@@ -79,8 +79,10 @@ ADMIN_PASSWORD='ваш-пароль' docker compose up -d
 | `SIGNAGE_MAX_UPLOAD_MB` | `1024` | лимит размера загружаемого файла |
 | `SIGNAGE_POLL_INTERVAL` | `60` | период опроса сервера агентами, сек |
 
-В продакшене поставьте сервер за reverse-proxy с HTTPS (Caddy, nginx,
-Traefik) — токены устройств и cookie не должны ходить открытым текстом.
+В продакшене поставьте сервер за reverse-proxy с HTTPS — токены устройств и
+cookie не должны ходить открытым текстом. Готовая инструкция для боевого
+развёртывания (Docker-хост + HAProxy на OPNsense, HTTPS, WebSocket-терминал,
+бэкапы): **[docs/DEPLOY.md](docs/DEPLOY.md)**.
 
 ## Данные и обновление без потери контента
 
