@@ -33,7 +33,7 @@ import urllib.request
 from datetime import datetime
 from pathlib import Path
 
-AGENT_VERSION = "0.10.0"
+AGENT_VERSION = "0.11.0"
 
 log = logging.getLogger("signage")
 
@@ -44,11 +44,12 @@ HEARTBEAT_SEC = 30
 DOWNLOAD_CHUNK = 256 * 1024
 MPV_ARGS = [
     "--idle=yes", "--fullscreen", "--no-terminal", "--no-osc", "--no-osd-bar",
-    # keep-open=yes удерживает последний кадр до загрузки следующего файла,
-    # поэтому при смене контента не мелькает чёрный экран/консоль.
-    "--keep-open=yes", "--keep-open-pause=no", "--loop-file=no",
-    "--hwdec=auto-safe", "--force-window=yes", "--background=color",
-    "--background-color=#000000", "--cursor-autohide=always",
+    # keep-open=no — сразу переходим к следующему файлу по окончании текущего
+    # (keep-open=yes в v0.10 приводил к зависанию ~20с между афишами).
+    "--keep-open=no", "--loop-file=no", "--hwdec=auto-safe",
+    # force-window держит чёрное окно mpv между файлами, чтобы в момент смены
+    # контента не просвечивал системный терминал.
+    "--force-window=yes",
     "--really-quiet", "--no-input-default-bindings", "--osd-level=0",
 ]
 
