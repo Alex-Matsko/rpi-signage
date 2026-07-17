@@ -18,6 +18,7 @@ import http.server
 import json
 import logging
 import os
+import re
 import secrets
 import shutil
 import signal
@@ -32,7 +33,7 @@ import urllib.request
 from datetime import datetime
 from pathlib import Path
 
-AGENT_VERSION = "0.6.0"
+AGENT_VERSION = "0.8.0"
 
 log = logging.getLogger("signage")
 
@@ -113,6 +114,41 @@ def _run(cmd: list[str], timeout: int = 20) -> tuple[int, str]:
         return 127, f"команда не найдена: {cmd[0]}"
     except subprocess.TimeoutExpired:
         return 124, "превышено время ожидания"
+
+
+def _audio_label(name: str) -> str:
+    low = name.lower()
+    if "hdmi" in low:
+        return "HDMI"
+    if ("headphone" in low or "analog" in low or "3.5" in low
+            or "bcm2835" in low):
+        return "Аналоговый (3.5 мм)"
+    return name
+
+
+def _parse_alsa_cards(text: str) -> list[dict]:
+    """Разбирает /proc/asound/cards → [{id, label}]. Чистая функция для тестов.
+
+    Формат строк:  ` 1 [Headphones     ]: bcm2835_headpho - bcm2835 Headphones`
+    """
+    cards = []
+    for line in text.splitlines():
+        m = re.match(r"\s*(\d+)\s+\[([^\]]+)\]:\s*(.*)", line)
+        if not m:
+            continue
+        card_id = m.group(2).strip()
+        rest = m.group(3)
+        longname = rest.split(" - ", 1)[1] if " - " in rest else rest
+        label = _audio_label(longname + " " + card_id)
+        cards.append({"id": card_id, "label": f"{label} · {card_id}"})
+    return cards
+
+
+def _alsa_cards() -> list[dict]:
+    try:
+        return _parse_alsa_cards(Path("/proc/asound/cards").read_text())
+    except OSError:
+        return []
 
 
 class SystemBackend:
@@ -199,27 +235,32 @@ class LinuxBackend(SystemBackend):
         return rc == 0, out
 
     def audio_outputs(self) -> list[dict]:
+        """Список аудиовыходов через ALSA (/proc/asound/cards).
+
+        Работает на headless-системе без сессии PipeWire/PulseAudio —
+        именно так агент запущен как systemd-сервис. id — строка устройства
+        для mpv (`alsa/plughw:CARD=<id>`).
+        """
         outs = []
+        for card in _alsa_cards():
+            outs.append({
+                "id": f"alsa/plughw:CARD={card['id']}",
+                "label": card["label"],
+            })
+        if outs:
+            return outs
+        # Резерв: если работает PipeWire/Pulse — берём его список
         rc, out = _run(["pactl", "list", "short", "sinks"])
         if rc == 0:
             for line in out.splitlines():
                 cols = line.split("\t")
                 if len(cols) >= 2:
-                    name = cols[1]
-                    label = name
-                    low = name.lower()
-                    if "hdmi" in low:
-                        label = "HDMI"
-                    elif "analog" in low or "headphone" in low or "3.5" in low:
-                        label = "Аналоговый (3.5 мм)"
-                    outs.append({"id": name, "label": f"{label} ({name})"})
+                    outs.append({"id": f"pulse/{cols[1]}", "label": cols[1]})
         return outs
 
     def set_audio_output(self, output_id: str) -> tuple[bool, str]:
-        if not output_id:
-            return True, ""
-        rc, out = _run(["pactl", "set-default-sink", output_id])
-        return rc == 0, out
+        # Применяется самим mpv (--audio-device); системного действия не нужно.
+        return True, ""
 
     def set_hostname(self, name: str) -> tuple[bool, str]:
         rc, out = _run(["sudo", "-n", "hostnamectl", "set-hostname", name])
@@ -294,10 +335,10 @@ class MockBackend(SystemBackend):
 def make_backend(dev: bool) -> SystemBackend:
     if dev:
         return MockBackend()
-    rc, _ = _run(["nmcli", "--version"], timeout=5)
-    if rc == 0:
+    if sys.platform.startswith("linux"):
+        # Звук (ALSA) и часовой пояс работают всегда; Wi-Fi — если есть nmcli
         return LinuxBackend()
-    log.warning("nmcli не найден — системные настройки в панели ограничены")
+    log.warning("Не Linux — системные настройки в панели ограничены")
     return SystemBackend()
 
 
@@ -529,6 +570,9 @@ class MockPlayer:
         """Заглушка-PNG (1×1) — чтобы протокол скриншотов работал в dev-режиме."""
         return _tiny_png()
 
+    def set_audio_device(self, device: str) -> None:
+        log.info("[mock] аудиовыход → %s", device or "авто")
+
     def shutdown(self) -> None:
         pass
 
@@ -552,20 +596,33 @@ class MpvPlayer:
     поэтому между афишами нет чёрного экрана.
     """
 
-    def __init__(self, socket_path: str, extra_args: list[str]):
+    def __init__(self, socket_path: str, extra_args: list[str],
+                 audio_device: str = ""):
         self.socket_path = socket_path
         self.extra_args = extra_args
+        self.audio_device = audio_device      # применённое устройство
+        self._desired_audio = audio_device    # выбранное в панели (др. поток)
         self.proc: subprocess.Popen | None = None
         self.sock: socket.socket | None = None
         self._req_id = 0
 
+    def set_audio_device(self, device: str) -> None:
+        """Смена аудиовыхода из веб-панели (перечитается плеером-потоком)."""
+        self._desired_audio = device or ""
+
     def _ensure_running(self) -> None:
+        # Аудиовыход сменили в панели — перезапустить mpv с новым устройством
+        if self._desired_audio != self.audio_device:
+            self.audio_device = self._desired_audio
+            self._close()
         if self.proc is not None and self.proc.poll() is None and self.sock:
             return
         self._close()
         Path(self.socket_path).unlink(missing_ok=True)
+        audio_args = ([f"--audio-device={self.audio_device}"]
+                      if self.audio_device else [])
         cmd = ["mpv", f"--input-ipc-server={self.socket_path}",
-               *MPV_ARGS, *self.extra_args]
+               *MPV_ARGS, *audio_args, *self.extra_args]
         log.info("Запускаю mpv: %s", " ".join(cmd))
         self.proc = subprocess.Popen(
             cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -1134,8 +1191,12 @@ class _WebHandler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def _redirect(self, location: str):
+        # Заголовок Location кодируется latin-1, поэтому кириллицу в query
+        # (например, текст сообщения) процент-кодируем. `%` в safe — чтобы
+        # уже закодированные значения не кодировались повторно.
+        safe = urllib.parse.quote(location, safe="/?:&=+%#,")
         self.send_response(303)
-        self.send_header("Location", location)
+        self.send_header("Location", safe)
         self.end_headers()
 
     # --- маршрутизация ---
@@ -1178,6 +1239,9 @@ class _WebHandler(http.server.BaseHTTPRequestHandler):
                 if ok:
                     self.ctx.settings.data["audio_output"] = out_id
                     self.ctx.settings.save()
+                    setter = self.ctx.actions.get("set_audio")
+                    if setter:
+                        setter(out_id)  # mpv переключит выход
                 self._redirect("/audio?" + urllib.parse.urlencode(
                     {"msg": "Аудиовыход сохранён."} if ok
                     else {"err": "Не удалось переключить звук. " + out}))
@@ -1362,11 +1426,14 @@ class _WebHandler(http.server.BaseHTTPRequestHandler):
                 f'<select name=audio_output>{options}</select>'
                 '<button type=submit>Сохранить</button></form>'
                 '<p class="muted" style="margin-bottom:0">Выберите HDMI или '
-                'аналоговый выход 3.5&nbsp;мм. Изменение применится в течение '
-                'одной ротации афиш.</p></div>')
+                'аналоговый выход 3.5&nbsp;мм. Звук идёт через ALSA напрямую '
+                '(без PipeWire); изменение применится в течение одной ротации '
+                'афиш.</p></div>')
         else:
-            body = ('<div class="card muted">Аудиовыходы не обнаружены. '
-                    'Проверьте, установлен ли pipewire/pulseaudio.</div>')
+            body = ('<div class="card muted">Аудиокарты не обнаружены '
+                    '(/proc/asound/cards пуст). Проверьте, что в системе есть '
+                    'звук и пользователь агента состоит в группе <b>audio</b>.'
+                    '</div>')
         return _page("Звук", body, flash, cls)
 
     def _page_system(self, flash, cls):
@@ -1478,8 +1545,11 @@ def cmd_run(args, state: State) -> int:
     state.cache_dir.mkdir(parents=True, exist_ok=True)
     state.load_saved_manifest()
 
-    player = MockPlayer() if args.dev else MpvPlayer(args.mpv_socket,
-                                                     args.mpv_arg or [])
+    settings = Settings(state.settings_path)
+    audio_device = settings.data.get("audio_output", "")
+    player = (MockPlayer() if args.dev
+              else MpvPlayer(args.mpv_socket, args.mpv_arg or [],
+                             audio_device=audio_device))
     placeholder = Path(args.placeholder) if args.placeholder else None
     stop = threading.Event()
 
@@ -1537,7 +1607,6 @@ def cmd_run(args, state: State) -> int:
     web = None
     if args.web_port and not args.no_web:
         state.web_port = args.web_port
-        settings = Settings(state.settings_path)
         backend = make_backend(args.dev)
 
         def _status_summary() -> dict:
@@ -1564,7 +1633,8 @@ def cmd_run(args, state: State) -> int:
 
         ctx = WebContext(
             settings, backend, state, _status_summary,
-            {"restart_agent": lambda: os._exit(0), "reboot": _reboot_action},
+            {"restart_agent": lambda: os._exit(0), "reboot": _reboot_action,
+             "set_audio": player.set_audio_device},
             auth_info=lambda: auth_box["auth"],
             bind=bind_action,
         )

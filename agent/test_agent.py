@@ -229,3 +229,42 @@ def test_cache_report_and_delete(tmp_path):
     # Полная очистка
     removed = agent.clear_cache(state)
     assert removed == 1 and not any(state.cache_dir.iterdir())
+
+
+# ------------------------------------------------ v0.8: ALSA-звук, редирект
+
+def test_alsa_card_parsing():
+    sample = (
+        "  0 [vc4hdmi0       ]: vc4-hdmi - vc4-hdmi-0\n"
+        "                      vc4-hdmi-0\n"
+        "  1 [Headphones     ]: bcm2835_headpho - bcm2835 Headphones\n"
+        "                      bcm2835 Headphones\n"
+    )
+    cards = agent._parse_alsa_cards(sample)
+    assert [c["id"] for c in cards] == ["vc4hdmi0", "Headphones"]
+    assert "HDMI" in cards[0]["label"]
+    assert "3.5" in cards[1]["label"]
+
+
+def test_alsa_empty():
+    assert agent._parse_alsa_cards("") == []
+
+
+def test_mpv_audio_device_arg():
+    p = agent.MpvPlayer("/tmp/x.sock", [], audio_device="alsa/plughw:CARD=Headphones")
+    assert p.audio_device == "alsa/plughw:CARD=Headphones"
+    # смена выхода из другого потока не применяется немедленно
+    p.set_audio_device("alsa/plughw:CARD=vc4hdmi0")
+    assert p._desired_audio == "alsa/plughw:CARD=vc4hdmi0"
+    assert p.audio_device == "alsa/plughw:CARD=Headphones"  # до перезапуска mpv
+
+
+def test_panel_restart_redirect_cyrillic(panel):
+    """Редирект с кириллицей в query не должен падать на latin-1 заголовке."""
+    status, _ = _req(panel[1], "POST", "/system/restart-agent")
+    assert status == 303  # раньше здесь был крах latin-1
+    settings, port = panel
+    # смена пароля тоже редиректит с кириллицей
+    status, _ = _req(port, "POST", "/system/password",
+                     body="user=admin&password=short&password2=short")
+    assert status == 303

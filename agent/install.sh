@@ -30,21 +30,22 @@ if [[ "$(id -u)" -ne 0 ]]; then
 fi
 SERVER="${SERVER%/}"
 
-echo "==> Устанавливаю зависимости (python3, mpv, network-manager)…"
+echo "==> Устанавливаю зависимости (python3, mpv, network-manager, alsa)…"
 apt-get update -qq
-# network-manager и pipewire нужны локальной веб-панели устройства
-# (настройка Wi-Fi через nmcli и выбор аудиовыхода через pactl)
+# network-manager — Wi-Fi через nmcli; alsa-utils — звук напрямую через ALSA
+# (headless-система без сессии PipeWire; mpv выводит звук через ALSA).
 DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
-  python3 mpv curl ca-certificates network-manager \
-  pipewire pipewire-pulse wireplumber pulseaudio-utils || \
+  python3 mpv curl ca-certificates network-manager alsa-utils || \
 DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
-  python3 mpv curl ca-certificates network-manager
+  python3 mpv curl ca-certificates
 
 echo "==> Создаю пользователя signage…"
 if ! id signage >/dev/null 2>&1; then
   useradd --system --home-dir /var/lib/signage --create-home \
-          --groups video,render,input signage
+          --groups video,render,input,audio signage
 fi
+# Доступ к звуковым устройствам (на случай, если пользователь уже существовал)
+usermod -aG audio signage 2>/dev/null || true
 mkdir -p /opt/signage /var/lib/signage
 chown -R signage:signage /var/lib/signage
 
@@ -90,7 +91,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=signage
-SupplementaryGroups=video render input
+SupplementaryGroups=video render input audio
 ExecStart=/usr/bin/python3 /opt/signage/agent.py run --self-update --allow-system --placeholder /opt/signage/placeholder.png
 Restart=always
 RestartSec=5

@@ -16,7 +16,7 @@ from .routers import (
     agent, auth, dashboard, devices, media_lib, posters, publish, users,
 )
 
-APP_VERSION = "0.7.0"
+APP_VERSION = "0.8.0"
 
 
 def _bootstrap_admin() -> None:

@@ -6,7 +6,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=signage
-SupplementaryGroups=video render input
+SupplementaryGroups=video render input audio
 ExecStart=/usr/bin/python3 /opt/signage/agent.py run --self-update --allow-system --placeholder /opt/signage/placeholder.png
 Restart=always
 RestartSec=5
