@@ -1,8 +1,8 @@
 """Тесты чистых функций агента (agent.py — не пакет, грузим по пути)."""
-import base64
 import http.client
 import importlib.util
 import time
+import urllib.parse
 from datetime import datetime
 from pathlib import Path
 
@@ -132,14 +132,32 @@ def panel(tmp_path):
     server.stop()
 
 
-def _req(port, method, path, auth=("admin", "signage"), body=None):
+def _login(port, user, password):
+    """Логинится через форму (не HTTP Basic), возвращает (status, cookie|None)."""
     conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+    body = urllib.parse.urlencode({"user": user, "password": password})
+    conn.request("POST", "/login", body=body,
+                headers={"Content-Type": "application/x-www-form-urlencoded"})
+    resp = conn.getresponse()
+    resp.read()
+    cookie = next(
+        (v.split(";", 1)[0] for h, v in resp.getheaders()
+         if h.lower() == "set-cookie" and v.startswith("signage_panel_session=")),
+        None,
+    )
+    conn.close()
+    return resp.status, cookie
+
+
+def _req(port, method, path, auth=("admin", "signage"), body=None):
     headers = {}
     if auth:
-        token = base64.b64encode(f"{auth[0]}:{auth[1]}".encode()).decode()
-        headers["Authorization"] = "Basic " + token
+        _, cookie = _login(port, auth[0], auth[1])
+        if cookie:
+            headers["Cookie"] = cookie
     if body is not None:
         headers["Content-Type"] = "application/x-www-form-urlencoded"
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
     conn.request(method, path, body=body, headers=headers)
     resp = conn.getresponse()
     data = resp.read().decode()
@@ -148,11 +166,47 @@ def _req(port, method, path, auth=("admin", "signage"), body=None):
 
 
 def test_panel_requires_auth(panel):
+    """Без сессии — редирект на форму входа, а не всплывающее окно Basic."""
     _settings, port = panel
-    status, _ = _req(port, "GET", "/", auth=None)
-    assert status == 401
-    status, _ = _req(port, "GET", "/", auth=("admin", "wrong"))
-    assert status == 401
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+    conn.request("GET", "/")
+    resp = conn.getresponse()
+    resp.read()
+    assert resp.status == 303
+    assert resp.getheader("Location") == "/login"
+    conn.close()
+
+    status, cookie = _login(port, "admin", "wrong")
+    assert status == 303 and cookie is None  # неверный пароль — сессия не выдана
+
+
+def test_panel_login_logout_flow(panel):
+    _settings, port = panel
+    status, cookie = _login(port, "admin", "signage")
+    assert status == 303 and cookie is not None
+
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+    conn.request("GET", "/", headers={"Cookie": cookie})
+    resp = conn.getresponse()
+    body = resp.read().decode()
+    conn.close()
+    assert resp.status == 200 and "Обзор" in body
+
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+    conn.request("POST", "/logout", headers={"Cookie": cookie})
+    resp = conn.getresponse()
+    resp.read()
+    conn.close()
+    assert resp.status == 303
+
+    # Сессия отозвана — та же кука больше не пускает
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+    conn.request("GET", "/", headers={"Cookie": cookie})
+    resp = conn.getresponse()
+    resp.read()
+    conn.close()
+    assert resp.status == 303
+    assert resp.getheader("Location") == "/login"
 
 
 def test_panel_pages(panel):
@@ -176,9 +230,9 @@ def test_panel_change_password(panel):
                      body="user=boss&password=longpass&password2=longpass")
     assert status == 303
     assert settings.check_password("boss", "longpass")
-    # Старые доступы больше не работают
+    # Старые доступы больше не работают (логин не выдаст сессию -> редирект)
     status, _ = _req(port, "GET", "/", auth=("admin", "signage"))
-    assert status == 401
+    assert status == 303
     status, _ = _req(port, "GET", "/", auth=("boss", "longpass"))
     assert status == 200
 

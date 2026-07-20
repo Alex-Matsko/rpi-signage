@@ -33,7 +33,7 @@ import urllib.request
 from datetime import datetime
 from pathlib import Path
 
-AGENT_VERSION = "0.12.0"
+AGENT_VERSION = "0.13.0"
 
 log = logging.getLogger("signage")
 
@@ -1184,14 +1184,22 @@ border-bottom:1px solid #2b3648;font-size:14px}
 .flash.ok{background:#143526;color:#4cc287}.flash.err{background:#3d1c1c;color:#e57373}
 .muted{color:#90a0b6}.kv{display:flex;justify-content:space-between;
 padding:5px 0;border-bottom:1px solid #232d3d;font-size:14px}
+button.linklike{background:none;border:0;color:#90a0b6;cursor:pointer;
+padding:0;font:inherit;margin:0}button.linklike:hover{color:#e6ebf4}
+.login-card{max-width:340px;margin:15vh auto 0}
 """
 
 _NAV = (
     '<header><b>📺 Signage</b>'
     '<a href="/">Обзор</a><a href="/server">Сервер</a>'
     '<a href="/network">Сеть</a><a href="/audio">Звук</a>'
-    '<a href="/storage">Хранилище</a><a href="/system">Система</a></header>'
+    '<a href="/storage">Хранилище</a><a href="/system">Система</a>'
+    '<form method="post" action="/logout" style="margin-left:auto">'
+    '<button type="submit" class="linklike">Выйти</button></form></header>'
 )
+
+# Имя cookie сессии локальной панели (не путать с сессией сервера signage)
+_SESSION_COOKIE = "signage_panel_session"
 
 
 class WebContext:
@@ -1204,6 +1212,9 @@ class WebContext:
         self.actions = actions         # {"restart_agent":fn, "reboot":fn}
         self.auth_info = auth_info      # () -> dict|None (server, device_id)
         self.bind = bind                # (server_url, code) -> (ok, msg)
+        # Активные токены сессий панели (в памяти — сбрасываются при
+        # перезапуске агента, что для локальной панели устройства приемлемо)
+        self.sessions: set[str] = set()
 
 
 def _page(title: str, body: str, flash: str = "", flash_cls: str = "ok") -> bytes:
@@ -1214,6 +1225,30 @@ def _page(title: str, body: str, flash: str = "", flash_cls: str = "ok") -> byte
         f"<title>{html.escape(title)} — Signage</title><style>{_PAGE_CSS}</style>"
         f"</head><body>{_NAV}<main><h1>{html.escape(title)}</h1>"
         f"{flash_html}{body}</main></body></html>"
+    ).encode()
+
+
+def _page_login(err: str = "") -> bytes:
+    """Страница входа — обычная форма (не HTTP Basic), без общей навигации."""
+    flash_html = f'<div class="flash err">{html.escape(err)}</div>' if err else ""
+    body = (
+        '<div class="card login-card">'
+        '<h1 style="margin-top:0">📺 Вход в панель</h1>'
+        f'{flash_html}'
+        '<form method="post" action="/login">'
+        '<label>Логин</label>'
+        '<input name="user" autofocus required autocomplete="username">'
+        '<label>Пароль</label>'
+        '<input type="password" name="password" required '
+        'autocomplete="current-password">'
+        '<button type="submit" style="width:100%">Войти</button>'
+        '</form></div>'
+    )
+    return (
+        "<!doctype html><html lang=ru><head><meta charset=utf-8>"
+        "<meta name=viewport content='width=device-width,initial-scale=1'>"
+        f"<title>Вход — Signage</title><style>{_PAGE_CSS}</style>"
+        f"</head><body><main>{body}</main></body></html>"
     ).encode()
 
 
@@ -1228,25 +1263,25 @@ class _WebHandler(http.server.BaseHTTPRequestHandler):
         pass  # не засорять журнал агента
 
     # --- аутентификация ---
+    # Обычная форма входа вместо HTTP Basic (некоторые браузеры некорректно
+    # обрабатывают Basic-попап — не запоминают выход, не дают сменить
+    # пользователя, ломают повторный вход после смены пароля).
+    def _session_token(self) -> str | None:
+        cookie = self.headers.get("Cookie", "")
+        for part in cookie.split(";"):
+            part = part.strip()
+            if part.startswith(_SESSION_COOKIE + "="):
+                return part[len(_SESSION_COOKIE) + 1:]
+        return None
+
     def _authed(self) -> bool:
-        header = self.headers.get("Authorization", "")
-        if header.startswith("Basic "):
-            try:
-                raw = base64.b64decode(header[6:]).decode()
-                user, _, password = raw.partition(":")
-            except (ValueError, UnicodeDecodeError):
-                return False
-            return self.ctx.settings.check_password(user, password)
-        return False
+        token = self._session_token()
+        return token is not None and token in self.ctx.sessions
 
     def _require_auth(self) -> bool:
         if self._authed():
             return True
-        self.send_response(401)
-        self.send_header("WWW-Authenticate", 'Basic realm="Signage device"')
-        self.send_header("Content-Type", "text/plain; charset=utf-8")
-        self.end_headers()
-        self.wfile.write("Требуется вход".encode())
+        self._redirect("/login")
         return False
 
     def _form(self) -> dict:
@@ -1271,12 +1306,42 @@ class _WebHandler(http.server.BaseHTTPRequestHandler):
         self.send_header("Location", safe)
         self.end_headers()
 
+    def _handle_login(self):
+        form = self._form()
+        user = form.get("user", "")
+        password = form.get("password", "")
+        if self.ctx.settings.check_password(user, password):
+            token = secrets.token_urlsafe(32)
+            self.ctx.sessions.add(token)
+            self.send_response(303)
+            self.send_header("Location", "/")
+            self.send_header(
+                "Set-Cookie",
+                f"{_SESSION_COOKIE}={token}; Path=/; HttpOnly; SameSite=Strict",
+            )
+            self.end_headers()
+        else:
+            self._redirect("/login?" + urllib.parse.urlencode(
+                {"err": "Неверный логин или пароль."}))
+
+    def _handle_logout(self):
+        token = self._session_token()
+        if token:
+            self.ctx.sessions.discard(token)
+        self.send_response(303)
+        self.send_header("Location", "/login")
+        self.send_header("Set-Cookie", f"{_SESSION_COOKIE}=; Path=/; Max-Age=0")
+        self.end_headers()
+
     # --- маршрутизация ---
     def do_GET(self):
-        if not self._require_auth():
-            return
         path = urllib.parse.urlparse(self.path).path
         query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        if path == "/login":
+            self._send(_page_login(query.get("err", [""])[0]))
+            return
+        if not self._require_auth():
+            return
         flash = (query.get("msg", [""])[0], "ok") if "msg" in query else \
                 (query.get("err", [""])[0], "err") if "err" in query else ("", "ok")
         routes = {
@@ -1294,9 +1359,15 @@ class _WebHandler(http.server.BaseHTTPRequestHandler):
         self._send(handler(flash[0], flash[1]))
 
     def do_POST(self):
+        path = urllib.parse.urlparse(self.path).path
+        if path == "/login":
+            self._handle_login()
+            return
+        if path == "/logout":
+            self._handle_logout()
+            return
         if not self._require_auth():
             return
-        path = urllib.parse.urlparse(self.path).path
         form = self._form()
         try:
             if path == "/network/wifi":
