@@ -1,14 +1,15 @@
 """Группы устройств: операционные метки экранов (например, «только статика»,
-«видео-кассы»), не привязанные к городу. CRUD и состав группы — только для
-администратора: группа может объединять экраны разных городов, и менеджеру
-нельзя доверить редактирование состава, иначе он мог бы случайно расширить
-доступ плейлиста на чужие экраны (см. deps.group_in_scope)."""
-from fastapi import APIRouter, Depends, Form, Request
+«видео-кассы»). Группа не привязана к городу и в принципе может объединять
+экраны разных городов, но менеджер видит и редактирует только группы,
+целиком состоящие из устройств ЕГО городов (см. deps.group_in_scope) —
+и может добавлять в такую группу только свои же устройства. Админ работает
+без ограничений."""
+from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from sqlalchemy.orm import Session
 
 from ..db import get_db
-from ..deps import require_admin
-from ..models import City, Device, DeviceGroup, DeviceGroupMember, PlaylistTarget, User
+from ..deps import current_user, group_in_scope, user_city_ids, visible_cities
+from ..models import Device, DeviceGroup, DeviceGroupMember, PlaylistTarget, User
 from ..templating import templates
 from ..utils import redirect
 
@@ -26,13 +27,29 @@ def device_groups(device: Device, db: Session) -> list[DeviceGroup]:
     )
 
 
+def visible_groups(user: User, db: Session) -> list[DeviceGroup]:
+    """Админ видит все группы; менеджер — только те, что целиком состоят
+    из устройств его городов."""
+    groups = db.query(DeviceGroup).order_by(DeviceGroup.name).all()
+    if user.is_admin:
+        return groups
+    return [g for g in groups if group_in_scope(user, g, db)]
+
+
+def _check_group_access(user: User, group: DeviceGroup, db: Session) -> None:
+    if user.is_admin:
+        return
+    if not group_in_scope(user, group, db):
+        raise HTTPException(status_code=403, detail="Группа вне ваших городов")
+
+
 @router.get("")
 def groups_page(
     request: Request,
-    user: User = Depends(require_admin),
+    user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ):
-    groups = db.query(DeviceGroup).order_by(DeviceGroup.name).all()
+    groups = visible_groups(user, db)
     return templates.TemplateResponse(request, "groups.html", {
         "user": user, "groups": groups,
     })
@@ -41,7 +58,7 @@ def groups_page(
 @router.post("/create")
 def create_group(
     name: str = Form(...),
-    user: User = Depends(require_admin),
+    user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ):
     name = name.strip()
@@ -59,12 +76,13 @@ def create_group(
 def rename_group(
     group_id: int,
     name: str = Form(...),
-    user: User = Depends(require_admin),
+    user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ):
     g = db.get(DeviceGroup, group_id)
     if g is None:
         return redirect("/groups", err="Группа не найдена.")
+    _check_group_access(user, g, db)
     name = name.strip()
     if not name:
         return redirect("/groups", err="Укажите название группы.")
@@ -76,12 +94,13 @@ def rename_group(
 @router.post("/{group_id}/delete")
 def delete_group(
     group_id: int,
-    user: User = Depends(require_admin),
+    user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ):
     g = db.get(DeviceGroup, group_id)
     if g is None:
         return redirect("/groups", err="Группа не найдена.")
+    _check_group_access(user, g, db)
     db.query(PlaylistTarget).filter(PlaylistTarget.group_id == group_id).delete()
     name = g.name
     db.delete(g)  # cascade: DeviceGroupMember
@@ -93,17 +112,19 @@ def delete_group(
 def group_page(
     group_id: int,
     request: Request,
-    user: User = Depends(require_admin),
+    user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ):
     g = db.get(DeviceGroup, group_id)
     if g is None:
         return redirect("/groups", err="Группа не найдена.")
-    cities = db.query(City).order_by(City.name).all()
+    _check_group_access(user, g, db)
+    cities = visible_cities(user, db)
     devices_by_city = {c.id: sorted(c.devices, key=lambda d: d.name) for c in cities}
     orphans = (
         db.query(Device).filter(Device.city_id.is_(None))
         .order_by(Device.name).all()
+        if user.is_admin else []
     )
     member_device_ids = {m.device_id for m in g.members}
     return templates.TemplateResponse(request, "group_detail.html", {
@@ -116,15 +137,22 @@ def group_page(
 def update_members(
     group_id: int,
     device: list[int] = Form([]),
-    user: User = Depends(require_admin),
+    user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ):
     g = db.get(DeviceGroup, group_id)
     if g is None:
         return redirect("/groups", err="Группа не найдена.")
-    new_ids = {
-        d.id for d in db.query(Device).filter(Device.id.in_(device or [])).all()
-    }
+    _check_group_access(user, g, db)
+    candidates = db.query(Device).filter(Device.id.in_(device or [])).all()
+    if user.is_admin:
+        new_ids = {d.id for d in candidates}
+    else:
+        # Менеджер может добавлять в группу только устройства своих городов;
+        # доступ к самой группе уже проверен выше (_check_group_access), так
+        # что все СУЩЕСТВУЮЩИЕ участники и так гарантированно в его зоне.
+        allowed = user_city_ids(user, db)
+        new_ids = {d.id for d in candidates if d.city_id in allowed}
     existing = {m.device_id: m for m in g.members}
     for did, m in existing.items():
         if did not in new_ids:

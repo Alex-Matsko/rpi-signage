@@ -83,7 +83,7 @@
     {% else %}—{% endif %}</div>
   <div><span class="label">Группы</span>
     {% for g in device_groups %}<span class="chip mut">{{ g.name }}</span>{% else %}—{% endfor %}
-    {% if user.is_admin %} <a href="/groups" class="small">управлять</a>{% endif %}
+    <a href="/groups" class="small">управлять</a>
   </div>
 </div></div>
 

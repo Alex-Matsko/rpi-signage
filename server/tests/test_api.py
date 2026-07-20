@@ -543,6 +543,45 @@ def test_group_crud_and_membership(admin):
         assert len(members) == 1 and members[0].device_id == dev1
 
 
+def test_manager_can_manage_own_city_group(admin):
+    """Менеджер создаёт/редактирует группы из устройств СВОЕГО города, не
+    может трогать кросс-городскую группу и не может добавить в свою группу
+    чужое устройство (оно молча отфильтровывается)."""
+    own_city = _create_city(admin, "ГруппыМенеджерСвой")
+    other_city = _create_city(admin, "ГруппыМенеджерЧужой")
+    own_dev, _ = _create_screen(admin, "МенеджерГруппаЭкран", own_city)
+    other_dev, _ = _create_screen(admin, "ЧужойГруппаЭкран", other_city)
+    cross_group_id = _create_group(admin, "КроссМенеджерГруппа", [own_dev, other_dev])
+
+    pw = _create_manager(admin, "group_mgr", [own_city])
+    mgr = _login_manager("group_mgr", pw)
+
+    page = mgr.get("/groups")
+    assert page.status_code == 200
+    assert "КроссМенеджерГруппа" not in page.text
+
+    assert mgr.get(f"/groups/{cross_group_id}").status_code == 403
+    assert mgr.post(f"/groups/{cross_group_id}/rename",
+                    data={"name": "Взлом"}).status_code == 403
+    assert mgr.post(f"/groups/{cross_group_id}/members",
+                    data={"device": [str(own_dev)]}).status_code == 403
+
+    resp = mgr.post("/groups/create", data={"name": "МенеджерСвояГруппа"},
+                    follow_redirects=False)
+    assert "msg=" in resp.headers["location"]
+    with SessionLocal() as db:
+        own_group_id = db.query(DeviceGroup).filter(
+            DeviceGroup.name == "МенеджерСвояГруппа").one().id
+
+    mgr.post(f"/groups/{own_group_id}/members",
+             data={"device": [str(own_dev), str(other_dev)]},
+             follow_redirects=False)
+    with SessionLocal() as db:
+        member_ids = {m.device_id for m in db.query(DeviceGroupMember).filter(
+            DeviceGroupMember.group_id == own_group_id).all()}
+    assert member_ids == {own_dev}
+
+
 def test_playlist_crud_and_group_targeting(admin, client):
     """Плейлист, назначенный на ГРУППУ, доходит до устройства-члена группы,
     не назначенного напрямую ни на город, ни на экран."""
