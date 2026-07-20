@@ -33,7 +33,7 @@ import urllib.request
 from datetime import datetime
 from pathlib import Path
 
-AGENT_VERSION = "0.11.0"
+AGENT_VERSION = "0.12.0"
 
 log = logging.getLogger("signage")
 
@@ -51,6 +51,8 @@ MPV_ARGS = [
     # контента не просвечивал системный терминал.
     "--force-window=yes",
     "--really-quiet", "--no-input-default-bindings", "--osd-level=0",
+    # центрируем show-text для заставки «ожидает подключения» (см. play_awaiting)
+    "--osd-align-x=center", "--osd-align-y=center",
 ]
 
 
@@ -380,6 +382,8 @@ class State:
         self.started = time.monotonic()
         self.settings_path = state_dir / "settings.json"
         self.web_port = 0  # 0 = панель выключена
+        # Привязано ли устройство к серверу (для выбора заставки ожидания)
+        self.bound = False
         # Момент последнего успешного обмена с сервером (для индикатора связи)
         self.last_server_ok: float = 0.0
         # Немедленный повторный опрос манифеста (кнопка «отправить афиши»)
@@ -582,6 +586,12 @@ class MockPlayer:
         log.info("[mock] ▶ нет контента (заставка)")
         stop.wait(timeout=10)
 
+    def play_awaiting(self, stop: threading.Event, background: Path | None,
+                      state: "State") -> None:
+        log.info("[mock] ▶ ожидание подключения (панель http://%s:%d)",
+                 local_ip_address(), state.web_port or DEFAULT_WEB_PORT)
+        stop.wait(timeout=10)
+
     def screenshot(self) -> bytes:
         """Заглушка-PNG (1×1) — чтобы протокол скриншотов работал в dev-режиме."""
         return _tiny_png()
@@ -717,6 +727,34 @@ class MpvPlayer:
                 stop.wait(timeout=15)
         except (OSError, RuntimeError, ConnectionError) as e:
             log.error("Ошибка mpv в режиме ожидания: %s", e)
+            self._close()
+            stop.wait(timeout=5)
+
+    def play_awaiting(self, stop: threading.Event, background: Path | None,
+                      state: "State") -> None:
+        """Заставка «ожидает подключения» — до привязки устройства к серверу.
+
+        IP панели читаем заново на каждой итерации (может смениться по DHCP),
+        поэтому текст поверх фона обновляется вместе с перерисовкой кадра.
+        """
+        ip = local_ip_address()
+        port = state.web_port or DEFAULT_WEB_PORT
+        text = (
+            "Ожидает подключения\n"
+            f"Панель устройства: http://{ip}:{port}\n"
+            "Введите адрес сервера и код подключения в панели"
+        )
+        try:
+            self._ensure_running()
+            if background and background.exists():
+                self._send(["set_property", "image-display-duration", 20])
+                self._send(["loadfile", str(background), "replace"])
+            else:
+                self._send(["stop"])
+            self._send(["show-text", text, 19000])
+            stop.wait(timeout=15)
+        except (OSError, RuntimeError, ConnectionError) as e:
+            log.error("Ошибка mpv в режиме ожидания подключения: %s", e)
             self._close()
             stop.wait(timeout=5)
 
@@ -1097,14 +1135,22 @@ def heartbeat_loop(client: ServerClient, state: State,
 
 
 def playback_loop(player, state: State, placeholder: Path | None,
-                  stop: threading.Event) -> None:
-    """Крутит по кругу действующие элементы манифеста."""
+                  awaiting_bg: Path | None, stop: threading.Event) -> None:
+    """Крутит по кругу действующие элементы манифеста.
+
+    Пока устройство не привязано к серверу (`state.bound` ложно), вместо
+    обычной заставки «нет контента» показываем экран «ожидает подключения»
+    с IP-адресом и портом локальной панели.
+    """
     index = 0
     while not stop.is_set():
         items = state.playable_items()
         if not items:
             state.set_current(None)
-            player.play_idle(stop, placeholder)
+            if state.bound:
+                player.play_idle(stop, placeholder)
+            else:
+                player.play_awaiting(stop, awaiting_bg, state)
             continue
         index = index % len(items)
         item = items[index]
@@ -1577,6 +1623,8 @@ def cmd_run(args, state: State) -> int:
               else MpvPlayer(args.mpv_socket, args.mpv_arg or [],
                              audio_device=audio_device))
     placeholder = Path(args.placeholder) if args.placeholder else None
+    awaiting_bg = (Path(args.awaiting_background)
+                  if args.awaiting_background else None)
     stop = threading.Event()
 
     def _terminate(_sig, _frm):
@@ -1590,6 +1638,7 @@ def cmd_run(args, state: State) -> int:
     # Клиентские циклы (опрос сервера) запускаются один раз при наличии
     # регистрации — либо сразу, либо после привязки через веб-панель.
     auth_box: dict = {"auth": load_auth(state)}
+    state.bound = bool(auth_box["auth"])
     loops_started = threading.Event()
 
     def start_client_loops(auth: dict) -> None:
@@ -1626,6 +1675,7 @@ def cmd_run(args, state: State) -> int:
         except OSError:
             pass
         auth_box["auth"] = auth
+        state.bound = True
         start_client_loops(auth)
         return True, f"Привязано к серверу как «{result['name']}»."
 
@@ -1682,7 +1732,7 @@ def cmd_run(args, state: State) -> int:
                     args.web_port)
 
     log.info("Агент %s запущен (кеш: %s)", AGENT_VERSION, state.cache_dir)
-    playback_loop(player, state, placeholder, stop)
+    playback_loop(player, state, placeholder, awaiting_bg, stop)
     if web is not None:
         web.stop()
     return 0
@@ -1709,6 +1759,10 @@ def main() -> int:
     p_run.add_argument("--placeholder",
                        default=os.environ.get("SIGNAGE_PLACEHOLDER", ""),
                        help="изображение-заставка, когда контента нет")
+    p_run.add_argument("--awaiting-background",
+                       default=os.environ.get("SIGNAGE_AWAITING_BG", ""),
+                       help="фон экрана «ожидает подключения» (до привязки "
+                            "к серверу)")
     p_run.add_argument("--self-update", action="store_true",
                        help="обновлять agent.py с сервера при смене версии")
     p_run.add_argument("--allow-system", action="store_true",

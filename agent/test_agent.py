@@ -295,3 +295,18 @@ def test_resync_command_sets_event(tmp_path):
                          {"id": 1, "kind": "resync"}, False, __import__("threading").Event())
     assert st.resync.is_set()
     assert client.results == [(1, "done")]
+
+
+# ------------------------------------------------ v0.12: заставка ожидания
+
+def test_state_bound_defaults_false(tmp_path):
+    st = agent.State(tmp_path / "s")
+    assert st.bound is False
+
+
+def test_mock_player_play_awaiting_no_crash(tmp_path):
+    st = agent.State(tmp_path / "s")
+    st.web_port = 8088
+    stop = __import__("threading").Event()
+    stop.set()  # play_awaiting должен вернуться сразу, не дожидаясь таймаута
+    agent.MockPlayer().play_awaiting(stop, None, st)
