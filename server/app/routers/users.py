@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 from .. import security
 from ..db import get_db
 from ..deps import require_admin
-from ..models import City, ROLE_ADMIN, ROLE_MANAGER, User
+from ..models import City, ROLE_ADMIN, ROLE_MANAGER, User, UserCity
 from ..templating import templates
 from ..utils import redirect
 
@@ -34,7 +34,7 @@ def create_user(
     username: str = Form(...),
     password: str = Form(...),
     role: str = Form(ROLE_ADMIN),
-    city_id: int = Form(0),
+    city_id: list[int] = Form([]),
     user: User = Depends(require_admin),
     db: Session = Depends(get_db),
 ):
@@ -47,17 +47,42 @@ def create_user(
         )
     if db.query(User).filter(User.username == username).first():
         return redirect("/users", err=f"Пользователь «{username}» уже есть.")
-    if role == ROLE_MANAGER and not city_id:
-        return redirect("/users", err="Менеджеру нужно назначить город.")
     is_manager = role == ROLE_MANAGER
-    db.add(User(
+    valid_ids = [c for c in city_id if db.get(City, c) is not None]
+    if is_manager and not valid_ids:
+        return redirect("/users", err="Менеджеру нужно назначить хотя бы один город.")
+    new_user = User(
         username=username,
         password_hash=security.hash_password(password),
         role=ROLE_MANAGER if is_manager else ROLE_ADMIN,
-        city_id=(city_id or None) if is_manager else None,
-    ))
+        city_id=(valid_ids[0] if is_manager else None),  # подсказка осн. города
+    )
+    if is_manager:
+        new_user.city_links = [UserCity(city_id=c) for c in valid_ids]
+    db.add(new_user)
     db.commit()
     return redirect("/users", msg=f"Пользователь «{username}» создан.")
+
+
+@router.post("/{user_id}/cities")
+def update_user_cities(
+    user_id: int,
+    city_id: list[int] = Form([]),
+    user: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    target = db.get(User, user_id)
+    if target is None:
+        return redirect("/users", err="Пользователь не найден.")
+    if target.is_admin:
+        return redirect("/users", err="У администратора нет привязки к городу.")
+    valid_ids = [c for c in city_id if db.get(City, c) is not None]
+    if not valid_ids:
+        return redirect("/users", err="Менеджеру нужен хотя бы один город.")
+    target.city_links = [UserCity(city_id=c) for c in valid_ids]
+    target.city_id = valid_ids[0]  # подсказка осн. города — держим в синхроне
+    db.commit()
+    return redirect("/users", msg=f"Города «{target.username}» обновлены.")
 
 
 @router.post("/{user_id}/password")

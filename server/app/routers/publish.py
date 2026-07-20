@@ -8,6 +8,7 @@ from ..deps import current_user, visible_cities
 from ..models import Device, MediaFile, Poster, PosterTarget, User
 from ..templating import templates
 from ..utils import parse_dt_local, redirect
+from .media_lib import visible_media
 
 router = APIRouter(prefix="/publish")
 
@@ -22,10 +23,7 @@ def publish_page(
     devices_by_city = {
         c.id: sorted(c.devices, key=lambda d: d.name) for c in cities
     }
-    library = (
-        db.query(MediaFile).order_by(MediaFile.created_at.desc()).limit(60).all()
-        if user.is_admin else []
-    )
+    library = visible_media(user, db)[:60]
     return templates.TemplateResponse(request, "publish.html", {
         "user": user,
         "cities": cities,
@@ -92,7 +90,7 @@ def publish(
         mf = db.query(MediaFile).filter(
             MediaFile.sha256 == attrs["sha256"]).first()
         if mf is None:
-            mf = MediaFile(**attrs)
+            mf = MediaFile(**attrs, uploaded_by=user.id)
             if mf.kind == "video" and not mf.compatible:
                 mf.transcode_status = "pending"
             db.add(mf)

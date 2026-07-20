@@ -2,13 +2,16 @@
 
 create_all создаёт новые таблицы, но не меняет существующие — здесь
 досоздаются колонки и переносятся данные со старых схем (v0.1/v0.2:
-группы устройств и плейлисты -> города и прямые назначения афиш).
+группы устройств и плейлисты -> города и прямые назначения афиш; v0.4:
+плейлисты/группы возвращены как отдельные таблицы — см.
+rename_legacy_group_playlist_tables и _backfill_user_cities).
 """
 from sqlalchemy import Engine
 
 # (таблица, колонка, SQL-тип с default)
 _COLUMNS = [
     ("media_files", "transcode_status", "VARCHAR(8) NOT NULL DEFAULT 'none'"),
+    ("media_files", "uploaded_by", "INTEGER"),
     ("posters", "daily_from", "VARCHAR(5)"),
     ("posters", "daily_until", "VARCHAR(5)"),
     ("posters", "weekdays_mask", "INTEGER"),
@@ -21,6 +24,14 @@ _COLUMNS = [
     ("devices", "local_ip", "VARCHAR(45)"),
     ("devices", "web_port", "INTEGER"),
 ]
+
+# v0.1/v0.2 таблицы групп/плейлистов, оставшиеся от _migrate_groups_and_playlists
+# (переносятся данные, но сами таблицы не удаляются). С v0.4 эти же имена
+# заняты новыми моделями DeviceGroup/Playlist/PlaylistItem — если старая
+# таблица физически существует, create_all её не тронет и код молча
+# привяжется к несовместимой схеме. Поэтому переименовываем их в сторону
+# ДО create_all (см. rename_legacy_group_playlist_tables, main.py).
+_LEGACY_GROUP_PLAYLIST_TABLES = ["device_groups", "playlists", "playlist_items"]
 
 
 def _table_columns(conn, table: str) -> set[str]:
@@ -48,6 +59,28 @@ def _mark_migration(conn, name: str) -> None:
     )
 
 
+def rename_legacy_group_playlist_tables(engine: Engine) -> None:
+    """Разово, ДО create_all: уводит в сторону старые (v0.1/v0.2) таблицы
+    device_groups/playlists/playlist_items, если они физически остались в
+    базе после переноса данных на v0.3 (_migrate_groups_and_playlists их
+    читает, но никогда не удаляет). Иначе create_all не сможет создать
+    новые одноимённые таблицы с v0.4-схемой — create_all не трогает уже
+    существующие таблицы, и код молча привяжется к старой несовместимой
+    форме (упадёт на первой же вставке: "no such column").
+
+    На свежей базе (без легаси-таблиц) — no-op, безопасно вызывать всегда.
+    """
+    with engine.begin() as conn:
+        if _migration_done(conn, "v04_rename_legacy_tables"):
+            return
+        for table in _LEGACY_GROUP_PLAYLIST_TABLES:
+            if _table_exists(conn, table):
+                conn.exec_driver_sql(
+                    f"ALTER TABLE {table} RENAME TO legacy_{table}_v1"
+                )
+        _mark_migration(conn, "v04_rename_legacy_tables")
+
+
 def run_migrations(engine: Engine) -> None:
     with engine.begin() as conn:
         for table, column, ddl in _COLUMNS:
@@ -59,6 +92,22 @@ def run_migrations(engine: Engine) -> None:
         if not _migration_done(conn, "v03_groups_playlists"):
             _migrate_groups_and_playlists(conn)
             _mark_migration(conn, "v03_groups_playlists")
+        if not _migration_done(conn, "v04_user_cities_backfill"):
+            _backfill_user_cities(conn)
+            _mark_migration(conn, "v04_user_cities_backfill")
+
+
+def _backfill_user_cities(conn) -> None:
+    """v0.4: разовый перенос User.city_id (единственный город) в user_cities
+    (многие-ко-многим). Колонка users.city_id остаётся как подсказка
+    основного города, но проверки доступа её больше не используют."""
+    for uid, cid in conn.exec_driver_sql(
+        "SELECT id, city_id FROM users WHERE city_id IS NOT NULL"
+    ).fetchall():
+        conn.exec_driver_sql(
+            "INSERT OR IGNORE INTO user_cities (user_id, city_id) VALUES (?, ?)",
+            (uid, cid),
+        )
 
 
 def _migrate_groups_and_playlists(conn) -> None:
@@ -66,15 +115,24 @@ def _migrate_groups_and_playlists(conn) -> None:
 
     Группы устройств становятся городами; назначения плейлистов
     (устройству или группе) превращаются в прямые назначения афиш
-    на экран или город. Старые таблицы остаются, но не используются.
+    на экран или город.
+
+    Читает из legacy_device_groups_v1/legacy_playlist_items_v1, а не из
+    device_groups/playlist_items напрямую: rename_legacy_group_playlist_tables
+    (вызывается ДО create_all, см. main.py) к этому моменту уже увёл старые
+    таблицы под эти имена, если они физически существовали — иначе к моменту
+    вызова этой функции (после create_all) под именами device_groups/
+    playlist_items уже лежат НОВЫЕ пустые таблицы v0.4-схемы (DeviceGroup/
+    PlaylistItem), и чтение из них дало бы неверные данные или упало на
+    "no such column".
     """
     device_cols = _table_columns(conn, "devices")
 
     # Группы -> города
     group_to_city = {}
-    if _table_exists(conn, "device_groups"):
+    if _table_exists(conn, "legacy_device_groups_v1"):
         groups = conn.exec_driver_sql(
-            "SELECT id, name, playlist_id FROM device_groups"
+            "SELECT id, name, playlist_id FROM legacy_device_groups_v1"
         ).fetchall()
         for gid, name, _pl in groups:
             cur = conn.exec_driver_sql(
@@ -92,13 +150,13 @@ def _migrate_groups_and_playlists(conn) -> None:
     else:
         groups = []
 
-    if not _table_exists(conn, "playlist_items"):
+    if not _table_exists(conn, "legacy_playlist_items_v1"):
         return
 
     def playlist_posters(pl_id):
         return [r[0] for r in conn.exec_driver_sql(
-            "SELECT poster_id FROM playlist_items WHERE playlist_id = ? "
-            "ORDER BY position", (pl_id,)
+            "SELECT poster_id FROM legacy_playlist_items_v1 "
+            "WHERE playlist_id = ? ORDER BY position", (pl_id,)
         )]
 
     # Плейлист устройства -> назначения афиш на экран

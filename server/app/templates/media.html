@@ -3,7 +3,7 @@
 {% block content %}
 <div class="topbar">
   <h1>Медиатека</h1>
-  <span class="sub">исходные файлы всех афиш</span>
+  <span class="sub">{{ 'исходные файлы всех афиш' if user.is_admin else 'ваши загруженные и использованные файлы' }}</span>
 </div>
 
 <div class="panel">
@@ -148,10 +148,12 @@
           <button type="submit" class="btn">Транскодировать</button>
         </form>
         {% endif %}
+        {% if user.is_admin %}
         <form method="post" action="/media/{{ f.id }}/delete"
               onsubmit="return confirm('Удалить файл «{{ f.orig_name }}»?')">
           <button type="submit" class="btn danger" {{ 'disabled' if f.posters }}>Удалить</button>
         </form>
+        {% endif %}
       </div>
     </td>
   </tr>

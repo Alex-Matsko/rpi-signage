@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% block title %}Группы устройств — Signage{% endblock %}
+{% block content %}
+<div class="topbar">
+  <h1>Группы устройств</h1>
+  <span class="sub">{{ groups|length }} гр.</span>
+</div>
+
+<div class="panel"><div class="p-body">
+  <form method="post" action="/groups/create" class="inline-form">
+    <input type="text" name="name" placeholder="Название группы (например, «Видео-кассы»)" required class="grow">
+    <button type="submit" class="btn primary">＋ Новая группа</button>
+  </form>
+</div></div>
+
+<table class="table">
+  <tr><th>Группа</th><th>Устройств</th><th></th><th></th></tr>
+  {% for g in groups %}
+  <tr>
+    <td><a href="/groups/{{ g.id }}">{{ g.name }}</a></td>
+    <td>{{ g.devices|length }}</td>
+    <td>
+      <form method="post" action="/groups/{{ g.id }}/rename" class="inline-form">
+        <input type="text" name="name" value="{{ g.name }}" aria-label="Название группы">
+        <button type="submit" class="btn small">Переименовать</button>
+      </form>
+    </td>
+    <td>
+      <form method="post" action="/groups/{{ g.id }}/delete"
+            onsubmit="return confirm('Удалить группу «{{ g.name }}»?')">
+        <button type="submit" class="btn danger small">Удалить</button>
+      </form>
+    </td>
+  </tr>
+  {% else %}
+  <tr><td colspan="4" class="muted">Групп пока нет.</td></tr>
+  {% endfor %}
+</table>
+{% endblock %}

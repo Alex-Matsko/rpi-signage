@@ -6,8 +6,8 @@ from sqlalchemy.orm import Session
 
 from .. import config
 from ..db import get_db
-from ..deps import check_city_access, current_user, visible_cities
-from ..models import Device, Poster, PosterTarget, User, now
+from ..deps import check_city_access, current_user, user_city_ids, visible_cities
+from ..models import Device, PlaylistItem, Poster, PosterTarget, User, now
 from ..templating import templates
 from ..utils import parse_dt_local, redirect
 
@@ -15,20 +15,21 @@ router = APIRouter(prefix="/posters")
 
 
 def visible_posters(user: User, db: Session) -> list[Poster]:
-    """Менеджер видит афиши, касающиеся его города (или созданные им)."""
+    """Менеджер видит афиши, касающиеся его городов (или созданные им)."""
     posters = (
         db.query(Poster).order_by(Poster.created_at.desc()).all()
     )
     if user.is_admin:
         return posters
+    allowed = user_city_ids(user, db)
     result = []
     for p in posters:
         if p.created_by == user.id:
             result.append(p)
             continue
         for t in p.targets:
-            if t.city_id == user.city_id or (
-                t.device is not None and t.device.city_id == user.city_id
+            if t.city_id in allowed or (
+                t.device is not None and t.device.city_id in allowed
             ):
                 result.append(p)
                 break
@@ -174,7 +175,9 @@ def delete_poster(
     if poster is None:
         return redirect("/posters", err="Афиша не найдена.")
     if not user.is_admin and poster.created_by != user.id:
-        check_city_access(user, None)  # 403
+        check_city_access(user, None, db)  # 403
+    db.query(PlaylistItem).filter(
+        PlaylistItem.poster_id == poster_id).delete()
     name = poster.name
     db.delete(poster)
     db.commit()

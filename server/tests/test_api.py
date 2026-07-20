@@ -6,7 +6,10 @@ from datetime import datetime, timedelta
 from PIL import Image
 
 from app.db import SessionLocal
-from app.models import City, Device, MediaFile, Poster
+from app.models import (
+    City, Device, DeviceGroup, DeviceGroupMember, MediaFile, PlaylistTarget,
+    Poster,
+)
 
 
 def _png_bytes(color: str = "red") -> bytes:
@@ -36,6 +39,39 @@ def _register_agent(client, code):
     resp = client.post("/api/agent/register", json={"code": code})
     assert resp.status_code == 200
     return {"Authorization": f"Bearer {resp.json()['token']}"}
+
+
+def _create_manager(admin, username, city_ids, password="manager-pass-1"):
+    """Создаёт менеджера с одним или несколькими городами, возвращает пароль."""
+    resp = admin.post("/users/create", data={
+        "username": username, "password": password, "role": "manager",
+        "city_id": [str(c) for c in city_ids],
+    }, follow_redirects=False)
+    assert "msg=" in resp.headers["location"], resp.headers["location"]
+    return password
+
+
+def _login_manager(username, password):
+    from fastapi.testclient import TestClient
+
+    from app.main import app
+    c = TestClient(app)
+    resp = c.post("/login", data={"username": username, "password": password},
+                 follow_redirects=False)
+    assert resp.status_code == 303
+    return c
+
+
+def _create_group(admin, name, device_ids):
+    resp = admin.post("/groups/create", data={"name": name},
+                      follow_redirects=False)
+    assert "msg=" in resp.headers["location"]
+    with SessionLocal() as db:
+        group_id = db.query(DeviceGroup).filter(DeviceGroup.name == name).one().id
+    admin.post(f"/groups/{group_id}/members",
+              data={"device": [str(d) for d in device_ids]},
+              follow_redirects=False)
+    return group_id
 
 
 def test_healthz(client):
@@ -189,9 +225,10 @@ def test_manager_scoped(admin, client):
         assert "Тюмень касса" in page
         assert "Казань касса" not in page
 
-        # Пользователи и медиатека — только для админа
+        # Пользователи — только для админа; медиатека теперь открыта менеджеру
+        # (но со своей, отдельной видимостью — см. test_media_library_scoped_for_manager)
         assert manager.get("/users").status_code == 403
-        assert manager.get("/media").status_code == 403
+        assert manager.get("/media").status_code == 200
 
         # Публикация в чужой город игнорирует чужие цели → ошибка «нет целей»
         resp = manager.post(
@@ -451,3 +488,219 @@ def test_transcode_incompatible_video(admin):
         assert mf.transcode_status == "done", mf.compat_warning
         assert mf.video_codec == "h264"
         assert mf.compatible is True
+
+
+# ------------------------------------------------ v0.4: плейлисты, группы,
+#                                                    мультигород, медиатека
+
+def test_manager_multi_city_access(admin):
+    """Менеджер с двумя городами видит оба, но не третий."""
+    a = _create_city(admin, "МультиА")
+    b = _create_city(admin, "МультиБ")
+    c3 = _create_city(admin, "МультиВ")
+    _create_screen(admin, "Касса А", a)
+    _create_screen(admin, "Касса Б", b)
+    _create_screen(admin, "Касса В", c3)
+    pw = _create_manager(admin, "multi1", [a, b])
+    mgr = _login_manager("multi1", pw)
+
+    page = mgr.get("/screens").text
+    assert "Касса А" in page and "Касса Б" in page and "Касса В" not in page
+
+    # публикация в третий (чужой) город запрещена
+    resp = mgr.post(
+        "/publish",
+        files=[("files", ("mm.png", _png_bytes("gray"), "image/png"))],
+        data={"city": [str(c3)]}, follow_redirects=False,
+    )
+    assert "err=" in resp.headers["location"]
+
+    # публикация сразу в оба СВОИХ города — проходит
+    resp = mgr.post(
+        "/publish",
+        files=[("files", ("mm2.png", _png_bytes("gray"), "image/png"))],
+        data={"city": [str(a), str(b)]}, follow_redirects=False,
+    )
+    assert "err" not in resp.headers["location"]
+
+
+def test_group_crud_and_membership(admin):
+    city_id = _create_city(admin, "Группы-город")
+    dev1, _ = _create_screen(admin, "Группа-экран-1", city_id)
+    dev2, _ = _create_screen(admin, "Группа-экран-2", city_id)
+    group_id = _create_group(admin, "Только видео", [dev1, dev2])
+
+    with SessionLocal() as db:
+        assert db.query(DeviceGroupMember).filter(
+            DeviceGroupMember.group_id == group_id).count() == 2
+
+    # снимаем одно устройство — состав заменяется целиком
+    admin.post(f"/groups/{group_id}/members", data={"device": [str(dev1)]},
+              follow_redirects=False)
+    with SessionLocal() as db:
+        members = db.query(DeviceGroupMember).filter(
+            DeviceGroupMember.group_id == group_id).all()
+        assert len(members) == 1 and members[0].device_id == dev1
+
+
+def test_playlist_crud_and_group_targeting(admin, client):
+    """Плейлист, назначенный на ГРУППУ, доходит до устройства-члена группы,
+    не назначенного напрямую ни на город, ни на экран."""
+    city_id = _create_city(admin, "Плейлист-город")
+    dev1, code1 = _create_screen(admin, "Плейлист-экран-1", city_id)
+    dev2, code2 = _create_screen(admin, "Плейлист-экран-2", city_id)
+    group_id = _create_group(admin, "ПлейлистГруппа", [dev2])
+
+    # афиша, назначенная напрямую на dev1 (чтобы получить Poster для плейлиста)
+    admin.post(
+        "/publish",
+        files=[("files", ("pl-item.png", _png_bytes("pink"), "image/png"))],
+        data={"device": [str(dev1)]}, follow_redirects=False,
+    )
+    with SessionLocal() as db:
+        poster_id = db.query(Poster).filter(Poster.name == "pl-item").one().id
+
+    resp = admin.post("/playlists/create",
+                      data={"name": "Витрина", "city_id": str(city_id)},
+                      follow_redirects=False)
+    playlist_id = int(resp.headers["location"].split("?")[0].rsplit("/", 1)[1])
+    admin.post(f"/playlists/{playlist_id}/items/add",
+              data={"poster_id": str(poster_id)}, follow_redirects=False)
+    resp = admin.post(f"/playlists/{playlist_id}/update", data={
+        "name": "Витрина", "group": [str(group_id)],
+    }, follow_redirects=False)
+    assert "msg=" in resp.headers["location"]
+
+    # dev2 не назначен напрямую — только через группу → плейлист
+    headers2 = _register_agent(client, code2)
+    names2 = [i["name"] for i in
+              client.get("/api/agent/manifest", headers=headers2).json()["items"]]
+    assert "pl-item" in names2
+
+    # dev1 продолжает получать афишу напрямую (не через плейлист)
+    headers1 = _register_agent(client, code1)
+    names1 = [i["name"] for i in
+              client.get("/api/agent/manifest", headers=headers1).json()["items"]]
+    assert "pl-item" in names1
+
+
+def test_agent_manifest_dedupes_direct_and_playlist(admin, client):
+    """Одна и та же афиша, доступная и напрямую, и через плейлист на тот же
+    экран, не дублируется в манифесте."""
+    city_id = _create_city(admin, "Дедуп-город")
+    device_id, code = _create_screen(admin, "Дедуп-экран", city_id)
+    admin.post(
+        "/publish",
+        files=[("files", ("dup.png", _png_bytes("cyan"), "image/png"))],
+        data={"device": [str(device_id)]}, follow_redirects=False,
+    )
+    with SessionLocal() as db:
+        poster_id = db.query(Poster).filter(Poster.name == "dup").one().id
+
+    resp = admin.post("/playlists/create",
+                      data={"name": "ДублёрПлейлист", "city_id": str(city_id)},
+                      follow_redirects=False)
+    playlist_id = int(resp.headers["location"].split("?")[0].rsplit("/", 1)[1])
+    admin.post(f"/playlists/{playlist_id}/items/add",
+              data={"poster_id": str(poster_id)}, follow_redirects=False)
+    admin.post(f"/playlists/{playlist_id}/update", data={
+        "name": "ДублёрПлейлист", "device": [str(device_id)],
+    }, follow_redirects=False)
+
+    headers = _register_agent(client, code)
+    items = client.get("/api/agent/manifest", headers=headers).json()["items"]
+    assert len([i for i in items if i["name"] == "dup"]) == 1
+
+
+def test_direct_poster_targeting_regression(admin, client):
+    """Прямое назначение афиши на город без единого плейлиста продолжает
+    работать как раньше (регрессия на переписанный device_posters())."""
+    city_id = _create_city(admin, "Регресс-город")
+    device_id, code = _create_screen(admin, "Регресс-экран", city_id)
+    admin.post(
+        "/publish",
+        files=[("files", ("direct.png", _png_bytes("lime"), "image/png"))],
+        data={"city": [str(city_id)]}, follow_redirects=False,
+    )
+    headers = _register_agent(client, code)
+    items = client.get("/api/agent/manifest", headers=headers).json()["items"]
+    assert [i["name"] for i in items] == ["direct"]
+
+
+def test_manager_blocked_from_cross_city_group(admin):
+    """Группа содержит устройство из чужого города — менеджер не может
+    назначить эту группу в своём плейлисте."""
+    own_city = _create_city(admin, "СвойГород-группа")
+    other_city = _create_city(admin, "ЧужойГород-группа")
+    own_dev, _ = _create_screen(admin, "Свой-экран", own_city)
+    other_dev, _ = _create_screen(admin, "Чужой-экран", other_city)
+    group_id = _create_group(admin, "Кросс-городская", [own_dev, other_dev])
+
+    pw = _create_manager(admin, "crossmgr", [own_city])
+    mgr = _login_manager("crossmgr", pw)
+
+    resp = mgr.post("/playlists/create",
+                    data={"name": "МенеджерПлейлист", "city_id": str(own_city)},
+                    follow_redirects=False)
+    playlist_id = int(resp.headers["location"].split("?")[0].rsplit("/", 1)[1])
+    resp = mgr.post(f"/playlists/{playlist_id}/update", data={
+        "name": "МенеджерПлейлист", "group": [str(group_id)],
+    }, follow_redirects=False)
+    assert resp.status_code == 303  # обновление не падает …
+
+    with SessionLocal() as db:
+        # … но группа отфильтрована — назначения не создано
+        assert db.query(PlaylistTarget).filter(
+            PlaylistTarget.playlist_id == playlist_id,
+            PlaylistTarget.group_id == group_id,
+        ).count() == 0
+
+
+def test_media_library_scoped_for_manager(admin):
+    """Менеджер видит файл, который сам загрузил/опубликовал, но не файл,
+    опубликованный админом в другой город."""
+    own_city = _create_city(admin, "МедиаСвой")
+    other_city = _create_city(admin, "МедиаЧужой")
+    _create_screen(admin, "МедиаСвой-экран", own_city)
+    pw = _create_manager(admin, "media_mgr", [own_city])
+    mgr = _login_manager("media_mgr", pw)
+
+    # Менеджер публикует в свой город — файл появляется в его медиатеке
+    mgr.post(
+        "/publish",
+        files=[("files", ("own.png", _png_bytes("gold"), "image/png"))],
+        data={"city": [str(own_city)]}, follow_redirects=False,
+    )
+    page = mgr.get("/media").text
+    assert "own.png" in page
+
+    # Админ публикует в чужой город — менеджер этот файл не видит
+    admin.post(
+        "/publish",
+        files=[("files", ("admins.png", _png_bytes("silver"), "image/png"))],
+        data={"city": [str(other_city)]}, follow_redirects=False,
+    )
+    page = mgr.get("/media").text
+    assert "admins.png" not in page
+
+
+def test_media_visibility_enforced_on_download(admin):
+    """Менеджер получает 403 при попытке скачать/просмотреть чужой файл
+    напрямую по id/hash — дыра, закрытая попутно с этой задачей."""
+    own_city = _create_city(admin, "СкачиваниеСвой")
+    other_city = _create_city(admin, "СкачиваниеЧужой")
+    pw = _create_manager(admin, "dl_mgr", [own_city])
+    mgr = _login_manager("dl_mgr", pw)
+
+    admin.post(
+        "/publish",
+        files=[("files", ("secret.png", _png_bytes("maroon"), "image/png"))],
+        data={"city": [str(other_city)]}, follow_redirects=False,
+    )
+    with SessionLocal() as db:
+        mf = db.query(MediaFile).filter(MediaFile.orig_name == "secret.png").one()
+        media_id, sha = mf.id, mf.sha256
+
+    assert mgr.get(f"/media/{media_id}/download").status_code == 403
+    assert mgr.get(f"/media/{media_id}/preview").status_code == 403
+    assert mgr.get(f"/thumbs/{sha}.jpg").status_code == 403

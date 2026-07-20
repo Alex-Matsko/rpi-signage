@@ -81,6 +81,10 @@
     {% if device.local_ip and device.web_port %}
       <a href="http://{{ device.local_ip }}:{{ device.web_port }}" target="_blank">{{ device.local_ip }}:{{ device.web_port }}</a>
     {% else %}—{% endif %}</div>
+  <div><span class="label">Группы</span>
+    {% for g in device_groups %}<span class="chip mut">{{ g.name }}</span>{% else %}—{% endfor %}
+    {% if user.is_admin %} <a href="/groups" class="small">управлять</a>{% endif %}
+  </div>
 </div></div>
 
 <div class="panel">

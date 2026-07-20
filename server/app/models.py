@@ -1,9 +1,13 @@
 """Модели данных. Все даты/время — наивные, в часовом поясе сервера (TZ).
 
 С v0.3 структура строится вокруг городов: экраны (кассы) принадлежат городу,
-афиши назначаются напрямую на города и/или отдельные экраны (PosterTarget),
-плейлисты как сущность убраны. Пользователи: администраторы (всё) и
-менеджеры города (только свой город).
+афиши назначаются напрямую на города и/или отдельные экраны (PosterTarget).
+С v0.4 плейлисты возвращены как дополнительный, необязательный способ
+назначения (Playlist/PlaylistItem/PlaylistTarget) поверх прямого — оба
+работают независимо; экраны можно группировать вне привязки к городу
+(DeviceGroup) для назначения плейлиста сразу на группу. Пользователи:
+администраторы (видят всё) и менеджеры (обслуживают один или несколько
+городов через UserCity).
 """
 from datetime import datetime
 
@@ -45,10 +49,31 @@ class User(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
 
     city: Mapped[City | None] = relationship()
+    # Многие-ко-многим: города, доступные менеджеру (city_id выше остаётся
+    # как подсказка основного города, но проверки доступа используют это)
+    city_links: Mapped[list["UserCity"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
 
     @property
     def is_admin(self) -> bool:
         return self.role == ROLE_ADMIN
+
+    @property
+    def cities(self) -> list["City"]:
+        return sorted((link.city for link in self.city_links), key=lambda c: c.name)
+
+
+class UserCity(Base):
+    """Многие-ко-многим: города, обслуживаемые менеджером."""
+
+    __tablename__ = "user_cities"
+
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), primary_key=True)
+    city_id: Mapped[int] = mapped_column(ForeignKey("cities.id"), primary_key=True)
+
+    user: Mapped["User"] = relationship(back_populates="city_links")
+    city: Mapped[City] = relationship()
 
 
 class MediaFile(Base):
@@ -70,6 +95,10 @@ class MediaFile(Base):
     transcode_status: Mapped[str] = mapped_column(
         String(8), default="none", server_default="none"
     )
+    # Кто загрузил файл (для видимости в медиатеке менеджера, если файл ещё
+    # не привязан ни к одной афише/плейлисту)
+    uploaded_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"),
+                                                     nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
 
     posters: Mapped[list["Poster"]] = relationship(back_populates="media")
@@ -200,3 +229,106 @@ class DeviceCommand(Base):
     done_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     device: Mapped[Device] = relationship(back_populates="commands")
+
+
+class DeviceGroup(Base):
+    """Операционная группа экранов (например: «только статика», «видео-кассы»).
+
+    Не привязана к городу — устройство любого города может входить в любую
+    группу; состав группы редактирует только администратор (см. deps.py:
+    group_in_scope запрещает менеджеру назначать в плейлисте группу,
+    содержащую устройства вне его городов).
+    """
+
+    __tablename__ = "device_groups"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(255), unique=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+
+    members: Mapped[list["DeviceGroupMember"]] = relationship(
+        back_populates="group", cascade="all, delete-orphan"
+    )
+
+    @property
+    def devices(self) -> list["Device"]:
+        return sorted((m.device for m in self.members), key=lambda d: d.name)
+
+
+class DeviceGroupMember(Base):
+    __tablename__ = "device_group_members"
+
+    device_id: Mapped[int] = mapped_column(ForeignKey("devices.id"),
+                                           primary_key=True)
+    group_id: Mapped[int] = mapped_column(ForeignKey("device_groups.id"),
+                                          primary_key=True)
+
+    device: Mapped["Device"] = relationship()
+    group: Mapped[DeviceGroup] = relationship(back_populates="members")
+
+
+class Playlist(Base):
+    """Именованная упорядоченная коллекция существующих афиш (Poster).
+
+    Расписание/длительность/медиа не дублируются — берутся из самой афиши.
+    Привязан к ровно одному городу — этим автоматически задаётся видимость
+    в UI менеджера. Дополнительный, необязательный способ назначения контента
+    поверх прямого PosterTarget (который продолжает работать независимо).
+    """
+
+    __tablename__ = "playlists"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(255))
+    city_id: Mapped[int] = mapped_column(ForeignKey("cities.id"), index=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"),
+                                                   nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+
+    city: Mapped[City] = relationship()
+    items: Mapped[list["PlaylistItem"]] = relationship(
+        back_populates="playlist", cascade="all, delete-orphan",
+        order_by="PlaylistItem.position",
+    )
+    targets: Mapped[list["PlaylistTarget"]] = relationship(
+        back_populates="playlist", cascade="all, delete-orphan"
+    )
+
+
+class PlaylistItem(Base):
+    """Афиша внутри плейлиста, в заданном порядке показа."""
+
+    __tablename__ = "playlist_items"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    playlist_id: Mapped[int] = mapped_column(ForeignKey("playlists.id"),
+                                             index=True)
+    poster_id: Mapped[int] = mapped_column(ForeignKey("posters.id"), index=True)
+    position: Mapped[int] = mapped_column(Integer, default=0,
+                                          server_default="0")
+
+    playlist: Mapped[Playlist] = relationship(back_populates="items")
+    poster: Mapped[Poster] = relationship()
+
+
+class PlaylistTarget(Base):
+    """Назначение плейлиста: на город целиком, на конкретный экран,
+    или на группу устройств (все экраны, входящие в неё сейчас)."""
+
+    __tablename__ = "playlist_targets"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    playlist_id: Mapped[int] = mapped_column(ForeignKey("playlists.id"),
+                                             index=True)
+    city_id: Mapped[int | None] = mapped_column(ForeignKey("cities.id"),
+                                                nullable=True, index=True)
+    device_id: Mapped[int | None] = mapped_column(ForeignKey("devices.id"),
+                                                  nullable=True, index=True)
+    group_id: Mapped[int | None] = mapped_column(ForeignKey("device_groups.id"),
+                                                 nullable=True, index=True)
+
+    playlist: Mapped[Playlist] = relationship(back_populates="targets")
+    city: Mapped[City | None] = relationship()
+    device: Mapped["Device"] = relationship()
+    group: Mapped[DeviceGroup | None] = relationship()

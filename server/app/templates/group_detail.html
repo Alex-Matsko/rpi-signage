@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+{% block title %}{{ g.name }} — Signage{% endblock %}
+{% block content %}
+<p><a href="/groups">← Все группы</a></p>
+<div class="topbar">
+  <h1>{{ g.name }}</h1>
+  <span class="chip mut">{{ g.devices|length }} устр.</span>
+  <div class="right">
+    <form method="post" action="/groups/{{ g.id }}/delete"
+          onsubmit="return confirm('Удалить группу «{{ g.name }}»?')">
+      <button type="submit" class="btn danger">Удалить группу</button>
+    </form>
+  </div>
+</div>
+
+<div class="panel">
+  <div class="p-head"><h3>Название</h3></div>
+  <div class="p-body">
+    <form method="post" action="/groups/{{ g.id }}/rename" class="inline-form">
+      <input type="text" name="name" value="{{ g.name }}" required class="grow">
+      <button type="submit" class="btn primary">Сохранить</button>
+    </form>
+  </div>
+</div>
+
+<div class="panel">
+  <div class="p-head"><h3>Состав группы</h3></div>
+  <div class="p-body">
+    <form method="post" action="/groups/{{ g.id }}/members">
+      {% for c in cities %}
+      {% set devs = devices_by_city[c.id] %}
+      {% set has_member = devs|selectattr('id', 'in', member_device_ids)|list %}
+      <details class="dest" {{ 'open' if has_member }}>
+        <summary><b>{{ c.name }}</b><small>{{ devs|length }} экр.</small></summary>
+        <div class="list">
+          {% for d in devs %}
+          <label><input type="checkbox" name="device" value="{{ d.id }}"
+                 {{ 'checked' if d.id in member_device_ids }}> {{ d.name }}</label>
+          {% else %}
+          <span class="muted small">Экранов нет</span>
+          {% endfor %}
+        </div>
+      </details>
+      {% endfor %}
+      {% if orphans %}
+      <details class="dest" open>
+        <summary><b>Без города</b><small>{{ orphans|length }} экр.</small></summary>
+        <div class="list">
+          {% for d in orphans %}
+          <label><input type="checkbox" name="device" value="{{ d.id }}"
+                 {{ 'checked' if d.id in member_device_ids }}> {{ d.name }}</label>
+          {% endfor %}
+        </div>
+      </details>
+      {% endif %}
+      <button type="submit" class="btn primary big">Сохранить состав</button>
+    </form>
+  </div>
+</div>
+{% endblock %}

@@ -17,7 +17,10 @@ from sqlalchemy import or_
 from .. import config, media, security
 from ..db import get_db
 from ..deps import current_device
-from ..models import Device, DeviceCommand, MediaFile, Poster, PosterTarget, now
+from ..models import (
+    Device, DeviceCommand, DeviceGroupMember, MediaFile, Playlist,
+    PlaylistTarget, Poster, PosterTarget, now,
+)
 from ..terminal import broker
 
 router = APIRouter(prefix="/api/agent")
@@ -43,19 +46,59 @@ def bundled_agent_version() -> str | None:
         return None
 
 
+def _device_group_ids(device: Device, db: Session) -> set[int]:
+    return {
+        row.group_id for row in
+        db.query(DeviceGroupMember).filter(
+            DeviceGroupMember.device_id == device.id).all()
+    }
+
+
 def device_posters(device: Device, db: Session) -> list[Poster]:
-    """Афиши, назначенные экрану: напрямую или через его город."""
-    conditions = [PosterTarget.device_id == device.id]
+    """Афиши, назначенные экрану: напрямую/через город (как раньше) — плюс
+    достижимые через включённые плейлисты (город/экран/группа плейлиста).
+
+    Прямой путь через PosterTarget не меняется и идёт первым; плейлисты —
+    дополнительный, необязательный способ назначения поверх него. Одна и та
+    же афиша, доступная и напрямую, и через плейлист, не дублируется.
+    """
+    direct_conditions = [PosterTarget.device_id == device.id]
     if device.city_id is not None:
-        conditions.append(PosterTarget.city_id == device.city_id)
-    return (
+        direct_conditions.append(PosterTarget.city_id == device.city_id)
+    direct = (
         db.query(Poster)
         .join(PosterTarget)
-        .filter(or_(*conditions))
+        .filter(or_(*direct_conditions))
         .order_by(Poster.sort_order, Poster.created_at, Poster.id)
         .distinct()
         .all()
     )
+    seen = {p.id for p in direct}
+
+    group_ids = _device_group_ids(device, db)
+    pl_conditions = [PlaylistTarget.device_id == device.id]
+    if device.city_id is not None:
+        pl_conditions.append(PlaylistTarget.city_id == device.city_id)
+    if group_ids:
+        pl_conditions.append(PlaylistTarget.group_id.in_(group_ids))
+
+    playlists = (
+        db.query(Playlist)
+        .join(PlaylistTarget)
+        .filter(Playlist.enabled.is_(True))
+        .filter(or_(*pl_conditions))
+        .distinct()
+        .all()
+    )
+    via_playlist = []
+    for pl in sorted(playlists, key=lambda p: (p.created_at, p.id)):
+        for item in pl.items:  # relationship уже упорядочен по position
+            if item.poster_id in seen:
+                continue
+            seen.add(item.poster_id)
+            via_playlist.append(item.poster)
+
+    return direct + via_playlist
 
 
 def build_manifest(device: Device, db: Session) -> dict:

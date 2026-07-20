@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% block title %}Плейлисты — Signage{% endblock %}
+{% block content %}
+<div class="topbar">
+  <h1>Плейлисты</h1>
+  <span class="sub">{{ playlists|length }}</span>
+</div>
+
+<div class="panel"><div class="p-body">
+  <form method="post" action="/playlists/create" class="inline-form">
+    <input type="text" name="name" placeholder="Название плейлиста" required class="grow">
+    <select name="city_id" required>
+      <option value="">— город —</option>
+      {% for c in cities %}<option value="{{ c.id }}">{{ c.name }}</option>{% endfor %}
+    </select>
+    <button type="submit" class="btn primary">＋ Новый плейлист</button>
+  </form>
+</div></div>
+
+<table class="table">
+  <tr><th>Плейлист</th><th>Город</th><th>Назначен на</th><th>Статус</th><th></th></tr>
+  {% for pl in playlists %}
+  <tr>
+    <td><a href="/playlists/{{ pl.id }}">{{ pl.name }}</a></td>
+    <td>{{ pl.city.name }}</td>
+    <td class="small">{{ target_summary(pl) }}</td>
+    <td>
+      {% if pl.enabled %}<span class="chip ok">включён</span>
+      {% else %}<span class="chip mut">выключен</span>{% endif %}
+    </td>
+    <td>{{ pl.items|length }} афиш</td>
+  </tr>
+  {% else %}
+  <tr><td colspan="5" class="muted">Плейлистов пока нет.</td></tr>
+  {% endfor %}
+</table>
+{% endblock %}

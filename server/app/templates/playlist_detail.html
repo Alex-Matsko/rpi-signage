@@ -1,0 +1,106 @@
+{% extends "base.html" %}
+{% block title %}{{ pl.name }} — Signage{% endblock %}
+{% block content %}
+<p><a href="/playlists">← Все плейлисты</a></p>
+<div class="topbar">
+  <h1>{{ pl.name }}</h1>
+  <span class="chip acc">{{ pl.city.name }}</span>
+  {% if pl.enabled %}<span class="chip ok">включён</span>
+  {% else %}<span class="chip mut">выключен</span>{% endif %}
+  <div class="right">
+    <form method="post" action="/playlists/{{ pl.id }}/toggle">
+      <button type="submit" class="btn">{{ 'Выключить' if pl.enabled else 'Включить' }}</button>
+    </form>
+    <form method="post" action="/playlists/{{ pl.id }}/delete"
+          onsubmit="return confirm('Удалить плейлист «{{ pl.name }}»?')">
+      <button type="submit" class="btn danger">Удалить</button>
+    </form>
+  </div>
+</div>
+
+<div class="wizard">
+  <div class="panel">
+    <div class="p-head"><h3>Содержимое</h3></div>
+    <div class="p-body">
+      <table class="table">
+        <tr><th>#</th><th>Афиша</th><th>Статус</th><th></th></tr>
+        {% for item in pl.items %}
+        {% set label, cls = POSTER_STATUS[item.poster.status] %}
+        <tr>
+          <td>{{ loop.index }}</td>
+          <td><a href="/posters/{{ item.poster_id }}">{{ item.poster.name }}</a></td>
+          <td><span class="chip {{ cls }}">{{ label }}</span></td>
+          <td class="row-actions">
+            <form method="post" action="/playlists/{{ pl.id }}/items/{{ item.id }}/move" style="display:inline">
+              <input type="hidden" name="direction" value="up">
+              <button type="submit" class="btn small" {{ 'disabled' if loop.first }}>↑</button>
+            </form>
+            <form method="post" action="/playlists/{{ pl.id }}/items/{{ item.id }}/move" style="display:inline">
+              <input type="hidden" name="direction" value="down">
+              <button type="submit" class="btn small" {{ 'disabled' if loop.last }}>↓</button>
+            </form>
+            <form method="post" action="/playlists/{{ pl.id }}/items/{{ item.id }}/delete" style="display:inline">
+              <button type="submit" class="btn danger small">Убрать</button>
+            </form>
+          </td>
+        </tr>
+        {% else %}
+        <tr><td colspan="4" class="muted">Плейлист пуст.</td></tr>
+        {% endfor %}
+      </table>
+      {% if candidate_posters %}
+      <form method="post" action="/playlists/{{ pl.id }}/items/add" class="inline-form" style="margin-top:12px">
+        <select name="poster_id" required class="grow">
+          {% for p in candidate_posters %}<option value="{{ p.id }}">{{ p.name }}</option>{% endfor %}
+        </select>
+        <button type="submit" class="btn primary">＋ Добавить афишу</button>
+      </form>
+      {% else %}
+      <p class="muted small">Нет доступных афиш для добавления —
+        <a href="/publish">опубликуйте</a> новую.</p>
+      {% endif %}
+    </div>
+  </div>
+
+  <form method="post" action="/playlists/{{ pl.id }}/update">
+    <input type="hidden" name="name" value="{{ pl.name }}">
+    <div class="panel">
+      <div class="p-head"><h3>Где показывается</h3></div>
+      <div class="p-body">
+        {% for c in cities %}
+        {% set has_dev = devices_by_city[c.id]|selectattr('id', 'in', target_device_ids)|list %}
+        <details class="dest" {{ 'open' if has_dev or cities|length == 1 }}>
+          <summary>
+            <input type="checkbox" name="city" value="{{ c.id }}"
+                   {{ 'checked' if c.id in target_city_ids }}
+                   onclick="event.stopPropagation()">
+            <b>{{ c.name }}</b><small>{{ devices_by_city[c.id]|length }} экр.</small>
+          </summary>
+          <div class="list">
+            {% for d in devices_by_city[c.id] %}
+            <label><input type="checkbox" name="device" value="{{ d.id }}"
+                   {{ 'checked' if d.id in target_device_ids }}> {{ d.name }}</label>
+            {% else %}
+            <span class="muted small">Экранов нет</span>
+            {% endfor %}
+          </div>
+        </details>
+        {% endfor %}
+        <details class="dest" {{ 'open' if target_group_ids }}>
+          <summary><b>Группы устройств</b><small>{{ groups|length }}</small></summary>
+          <div class="list">
+            {% for g in groups %}
+            <label><input type="checkbox" name="group" value="{{ g.id }}"
+                   {{ 'checked' if g.id in target_group_ids }}>
+                   {{ g.name }} <span class="muted small">({{ g.devices|length }} устр.)</span></label>
+            {% else %}
+            <span class="muted small">Нет доступных групп</span>
+            {% endfor %}
+          </div>
+        </details>
+      </div>
+    </div>
+    <button type="submit" class="btn primary big">Сохранить</button>
+  </form>
+</div>
+{% endblock %}

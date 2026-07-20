@@ -12,10 +12,14 @@ from .. import config, security
 from ..db import SessionLocal, get_db
 from ..deps import (
     check_city_access, check_device_access, current_user, require_admin,
-    visible_cities,
+    user_city_ids, visible_cities,
 )
-from ..models import City, Device, DeviceCommand, PosterTarget, User
+from ..models import (
+    City, Device, DeviceCommand, DeviceGroupMember, Playlist, PlaylistTarget,
+    PosterTarget, User, UserCity,
+)
 from ..routers.agent import build_manifest, bundled_agent_version
+from ..routers.groups import device_groups
 from ..security import read_session
 from ..templating import templates
 from ..terminal import broker
@@ -60,8 +64,8 @@ def create_screen(
     name = name.strip()
     if not name:
         return redirect("/screens", err="Укажите название экрана.")
-    if not user.is_admin:
-        city_id = user.city_id or 0
+    if not user.is_admin and city_id not in user_city_ids(user, db):
+        return redirect("/screens", err="Выберите один из ваших городов.")
     if city_id and db.get(City, city_id) is None:
         return redirect("/screens", err="Город не найден.")
     device = Device(
@@ -87,7 +91,7 @@ def screen_page(
     device = db.get(Device, device_id)
     if device is None:
         return redirect("/screens", err="Экран не найден.")
-    check_device_access(user, device)
+    check_device_access(user, device, db)
     recent_commands = (
         db.query(DeviceCommand)
         .filter(DeviceCommand.device_id == device_id,
@@ -105,6 +109,7 @@ def screen_page(
         "offline_after": config.OFFLINE_AFTER_SEC,
         "recent_commands": recent_commands,
         "command_labels": COMMAND_LABELS,
+        "device_groups": device_groups(device, db),
     })
 
 
@@ -118,7 +123,7 @@ def send_command(
     device = db.get(Device, device_id)
     if device is None:
         return redirect("/screens", err="Экран не найден.")
-    check_device_access(user, device)
+    check_device_access(user, device, db)
     if kind not in COMMAND_LABELS:
         return redirect(f"/screens/{device_id}", err="Неизвестная команда.")
     if device.token_hash is None:
@@ -139,7 +144,7 @@ def screenshot(
     device = db.get(Device, device_id)
     if device is None:
         raise HTTPException(status_code=404)
-    check_device_access(user, device)
+    check_device_access(user, device, db)
     path = config.SHOT_DIR / f"{device_id}.png"
     if not path.exists():
         raise HTTPException(status_code=404)
@@ -157,7 +162,7 @@ def terminal_page(
     device = db.get(Device, device_id)
     if device is None:
         return redirect("/screens", err="Экран не найден.")
-    check_device_access(user, device)
+    check_device_access(user, device, db)
     return templates.TemplateResponse(request, "terminal.html", {
         "user": user,
         "device": device,
@@ -184,7 +189,10 @@ async def terminal_ws(websocket: WebSocket, device_id: int):
         if user is None or device is None:
             await websocket.close(code=4401)
             return
-        if not user.is_admin and device.city_id != user.city_id:
+        if not user.is_admin and (
+            device.city_id is None or
+            device.city_id not in user_city_ids(user, db)
+        ):
             await websocket.close(code=4403)
             return
         if device.token_hash is None:
@@ -240,7 +248,7 @@ def update_screen(
     device = db.get(Device, device_id)
     if device is None:
         return redirect("/screens", err="Экран не найден.")
-    check_device_access(user, device)
+    check_device_access(user, device, db)
     device.name = name.strip() or device.name
     if user.is_admin:
         device.city_id = city_id or None
@@ -258,7 +266,7 @@ def repair_screen(
     device = db.get(Device, device_id)
     if device is None:
         return redirect("/screens", err="Экран не найден.")
-    check_device_access(user, device)
+    check_device_access(user, device, db)
     device.pairing_code = security.new_pairing_code()
     device.token_hash = None
     db.commit()
@@ -278,9 +286,13 @@ def delete_screen(
     device = db.get(Device, device_id)
     if device is None:
         return redirect("/screens", err="Экран не найден.")
-    check_device_access(user, device)
+    check_device_access(user, device, db)
     db.query(PosterTarget).filter(
         PosterTarget.device_id == device_id).delete()
+    db.query(PlaylistTarget).filter(
+        PlaylistTarget.device_id == device_id).delete()
+    db.query(DeviceGroupMember).filter(
+        DeviceGroupMember.device_id == device_id).delete()
     name = device.name
     db.delete(device)
     db.commit()
@@ -334,7 +346,14 @@ def delete_city(
             "/screens",
             err=f"В городе «{city.name}» есть экраны — сначала перенесите их.",
         )
+    if db.query(Playlist).filter(Playlist.city_id == city_id).count():
+        return redirect(
+            "/screens",
+            err=f"В городе «{city.name}» есть плейлисты — сначала удалите их.",
+        )
     db.query(PosterTarget).filter(PosterTarget.city_id == city_id).delete()
+    db.query(PlaylistTarget).filter(PlaylistTarget.city_id == city_id).delete()
+    db.query(UserCity).filter(UserCity.city_id == city_id).delete()
     db.query(User).filter(User.city_id == city_id).update({"city_id": None})
     name = city.name
     db.delete(city)

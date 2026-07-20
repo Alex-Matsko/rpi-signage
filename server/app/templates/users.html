@@ -8,25 +8,38 @@
     <input type="text" name="username" placeholder="Логин" required>
     <input type="password" name="password" placeholder="Пароль (мин. 8 символов)"
            required minlength="8" autocomplete="new-password">
-    <select name="role" id="role-select" onchange="document.getElementById('city-select').style.display = this.value === 'manager' ? '' : 'none'">
+    <select name="role" id="role-select" onchange="document.getElementById('city-multi').style.display = this.value === 'manager' ? '' : 'none'">
       <option value="admin">Администратор</option>
-      <option value="manager">Менеджер города</option>
+      <option value="manager">Менеджер городов</option>
     </select>
-    <select name="city_id" id="city-select" style="display:none">
-      <option value="0">— город —</option>
-      {% for c in cities %}<option value="{{ c.id }}">{{ c.name }}</option>{% endfor %}
-    </select>
+    <span id="city-multi" style="display:none">
+      {% for c in cities %}<label><input type="checkbox" name="city_id" value="{{ c.id }}"> {{ c.name }}</label>{% endfor %}
+    </span>
     <button type="submit" class="btn primary">Создать</button>
   </form>
 </div></div>
 
 <table class="table">
-  <tr><th>Логин</th><th>Роль</th><th>Создан</th><th>Сменить пароль</th><th></th></tr>
+  <tr><th>Логин</th><th>Роль / города</th><th>Создан</th><th>Сменить пароль</th><th></th></tr>
   {% for u in users %}
   <tr>
     <td>{{ u.username }}{% if u.id == user.id %} <span class="chip mut">это вы</span>{% endif %}</td>
-    <td>{% if u.is_admin %}<span class="chip acc">администратор</span>
-        {% else %}<span class="chip mut">менеджер · {{ u.city.name if u.city else '?' }}</span>{% endif %}</td>
+    <td>
+      {% if u.is_admin %}<span class="chip acc">администратор</span>
+      {% else %}
+        {% for c in u.cities %}<span class="chip mut">{{ c.name }}</span>{% else %}<span class="chip warn">без города</span>{% endfor %}
+        <details>
+          <summary class="small">изменить</summary>
+          <form method="post" action="/users/{{ u.id }}/cities" class="inline-form">
+            {% for c in cities %}
+            <label><input type="checkbox" name="city_id" value="{{ c.id }}"
+                   {{ 'checked' if c in u.cities }}> {{ c.name }}</label>
+            {% endfor %}
+            <button type="submit" class="btn small">Сохранить</button>
+          </form>
+        </details>
+      {% endif %}
+    </td>
     <td class="small">{{ u.created_at|dt }}</td>
     <td>
       <form method="post" action="/users/{{ u.id }}/password" class="inline-form">
