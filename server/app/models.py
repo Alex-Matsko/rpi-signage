@@ -197,6 +197,18 @@ class Device(Base):
     local_ip: Mapped[str | None] = mapped_column(String(45), nullable=True)
     web_port: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
+    # Ориентация физического экрана и раскладка одновременного показа афиш
+    orientation: Mapped[str] = mapped_column(
+        String(10), default="landscape", server_default="landscape"
+    )
+    # Сколько афиш показывается на экране одновременно: 1/2/3/4/6/8
+    grid_layout: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
+    # Сеткой показываются только картинки; если включено, видео на этом
+    # экране не показывается вовсе (см. build_grid_steps в агенте)
+    grid_images_only: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default="1"
+    )
+
     city: Mapped[City | None] = relationship(back_populates="devices")
     commands: Mapped[list["DeviceCommand"]] = relationship(
         back_populates="device", cascade="all, delete-orphan"

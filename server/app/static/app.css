@@ -278,6 +278,29 @@ pre { background: #10151d; color: #cdd6e4; padding: 12px; border-radius: 8px; ov
 .login-box input { width: 100%; margin-top: 4px; }
 .login-box .btn { width: 100%; margin-top: 6px; }
 
+/* ---------- ориентация и раскладка сетки экрана ---------- */
+.orient-picker, .layout-picker { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 6px; }
+.orient-opt, .layout-opt { position: relative; }
+.orient-opt input, .layout-opt input { position: absolute; inset: 0; opacity: 0; cursor: pointer; margin: 0; }
+.orient-opt .card, .layout-opt .card {
+  display: flex; flex-direction: column; align-items: center; gap: 7px;
+  padding: 10px 14px; border-radius: 8px; border: 1px solid var(--line);
+  background: var(--surface); color: var(--muted); font-size: 12.5px; min-width: 64px;
+}
+.orient-opt input:checked + .card, .layout-opt input:checked + .card {
+  border-color: var(--accent); background: var(--accent-soft); color: var(--accent); font-weight: 600;
+}
+.orient-opt input:focus-visible + .card, .layout-opt input:focus-visible + .card {
+  outline: 2px solid var(--accent); outline-offset: 2px;
+}
+.orient-icon { display: block; border: 2px solid currentColor; border-radius: 3px; }
+.orient-icon.landscape { width: 34px; height: 22px; }
+.orient-icon.portrait { width: 22px; height: 34px; }
+.layout-icon { display: grid; gap: 3px; width: 46px; height: 30px; }
+.layout-icon i { background: currentColor; opacity: .45; border-radius: 2px; }
+.layout-opt input:checked + .card .layout-icon i { opacity: 1; }
+.layout-opt .card .n { font-size: 11px; }
+
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
 @media (max-width: 820px) {
   .app { flex-direction: column; }

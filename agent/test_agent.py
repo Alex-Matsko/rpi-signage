@@ -364,3 +364,52 @@ def test_mock_player_play_awaiting_no_crash(tmp_path):
     stop = __import__("threading").Event()
     stop.set()  # play_awaiting должен вернуться сразу, не дожидаясь таймаута
     agent.MockPlayer().play_awaiting(stop, None, st)
+
+
+# ------------------------------------------------ ориентация и сетка экрана
+
+def test_state_apply_manifest_stores_grid(tmp_path):
+    st = agent.State(tmp_path / "s")
+    st.cache_dir.mkdir(parents=True, exist_ok=True)
+    st.apply_manifest([], "portrait", {"rows": 2, "cols": 3, "images_only": False})
+    assert st.orientation == "portrait"
+    assert st.grid == {"cells": 6, "rows": 2, "cols": 3, "images_only": False}
+
+
+def test_state_apply_manifest_default_grid(tmp_path):
+    st = agent.State(tmp_path / "s")
+    st.cache_dir.mkdir(parents=True, exist_ok=True)
+    st.apply_manifest([])  # без orientation/grid — как в старом манифесте
+    assert st.orientation == "landscape"
+    assert st.grid == {"cells": 1, "rows": 1, "cols": 1, "images_only": True}
+
+
+def test_build_grid_steps_single_cell_unchanged():
+    items = [{"kind": "image"}, {"kind": "video"}]
+    assert agent.build_grid_steps(items, 1, True) == [[items[0]], [items[1]]]
+
+
+def test_build_grid_steps_images_only_filters_video_and_chunks():
+    img1, vid, img2, img3 = (
+        {"kind": "image", "n": 1}, {"kind": "video", "n": 2},
+        {"kind": "image", "n": 3}, {"kind": "image", "n": 4},
+    )
+    steps = agent.build_grid_steps([img1, vid, img2, img3], 2, True)
+    assert steps == [[img1, img2], [img3]]
+
+
+def test_build_grid_steps_includes_video_when_not_images_only():
+    img, vid = {"kind": "image"}, {"kind": "video"}
+    assert agent.build_grid_steps([img, vid], 2, False) == [[img, vid]]
+
+
+def test_build_grid_steps_empty_pool_when_only_video_and_images_only():
+    assert agent.build_grid_steps([{"kind": "video"}], 4, True) == []
+
+
+def test_mpv_orientation_setter_deferred_until_restart():
+    p = agent.MpvPlayer("/tmp/x.sock", [])
+    assert p.orientation == "landscape"
+    p.set_orientation("portrait")
+    assert p._desired_orientation == "portrait"
+    assert p.orientation == "landscape"  # применится только при следующем запуске mpv

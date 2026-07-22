@@ -17,6 +17,7 @@ from sqlalchemy import or_
 from .. import config, media, security
 from ..db import get_db
 from ..deps import current_device
+from ..grid import grid_dims
 from ..models import (
     Device, DeviceCommand, DeviceGroupMember, MediaFile, Playlist,
     PlaylistTarget, Poster, PosterTarget, now,
@@ -133,14 +134,26 @@ def build_manifest(device: Device, db: Session) -> dict:
             "daily_until": poster.daily_until or None,
             "weekdays": poster.weekdays_mask or None,
         })
+    rows, cols = grid_dims(device.grid_layout, device.orientation)
     version = hashlib.sha256(
-        json.dumps(items, sort_keys=True, ensure_ascii=False).encode()
+        json.dumps(
+            {"items": items, "grid": [device.grid_layout, device.orientation,
+                                       device.grid_images_only]},
+            sort_keys=True, ensure_ascii=False,
+        ).encode()
     ).hexdigest()[:16]
     return {
         "manifest_version": version,
         "poll_interval": config.POLL_INTERVAL,
         "generated_at": now().isoformat(),
         "agent_version": bundled_agent_version(),
+        "orientation": device.orientation,
+        "grid": {
+            "layout": device.grid_layout,
+            "rows": rows,
+            "cols": cols,
+            "images_only": device.grid_images_only,
+        },
         "items": items,
     }
 

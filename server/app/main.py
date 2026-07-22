@@ -17,7 +17,7 @@ from .routers import (
     publish, users,
 )
 
-APP_VERSION = "0.11.0"
+APP_VERSION = "0.14.0"
 
 
 def _bootstrap_admin() -> None:

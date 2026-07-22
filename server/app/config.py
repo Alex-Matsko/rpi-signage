@@ -15,6 +15,9 @@ SECRET_KEY_FILE = DATA_DIR / "secret_key"
 MAX_SCREENSHOT_MB = int(os.environ.get("SIGNAGE_MAX_SCREENSHOT_MB", "8"))
 
 MAX_UPLOAD_MB = int(os.environ.get("SIGNAGE_MAX_UPLOAD_MB", "1024"))
+# Максимальный битрейт видео, Мбит/с: выше — автоматически сжимается
+# (RPi 2/3 захлёбываются на тяжёлых роликах: декодер + чтение с SD-карты)
+MAX_VIDEO_MBPS = float(os.environ.get("SIGNAGE_MAX_VIDEO_MBPS", "10"))
 POLL_INTERVAL = int(os.environ.get("SIGNAGE_POLL_INTERVAL", "60"))
 # Через сколько секунд без heartbeat устройство считается офлайн
 OFFLINE_AFTER_SEC = int(os.environ.get("SIGNAGE_OFFLINE_AFTER_SEC", "90"))

@@ -407,6 +407,51 @@ def test_resync_command(admin, client):
     assert any(c["kind"] == "resync" for c in cmds)
 
 
+def test_screen_display_settings_persist_and_reflect_in_manifest(admin, client):
+    """Ориентация/раскладка сохраняются и попадают в манифест агента."""
+    city_id = _create_city(admin, "Сетка")
+    device_id, code = _create_screen(admin, "Касса-сетка", city_id)
+    headers = _register_agent(client, code)
+
+    resp = admin.post(
+        f"/screens/{device_id}/display",
+        data={"orientation": "portrait", "grid_layout": "6",
+              "grid_images_only": "on"},
+        follow_redirects=False,
+    )
+    assert "msg=" in resp.headers["location"]
+
+    manifest = client.get("/api/agent/manifest", headers=headers).json()
+    assert manifest["orientation"] == "portrait"
+    # layout=6 в portrait -> 3 строки x 2 колонки (landscape было бы 2x3)
+    assert manifest["grid"] == {
+        "layout": 6, "rows": 3, "cols": 2, "images_only": True,
+    }
+
+    # Снимаем чекбокс "только статика" — HTML-форма просто не шлёт поле
+    resp2 = admin.post(
+        f"/screens/{device_id}/display",
+        data={"orientation": "landscape", "grid_layout": "4"},
+        follow_redirects=False,
+    )
+    assert "msg=" in resp2.headers["location"]
+    manifest2 = client.get("/api/agent/manifest", headers=headers).json()
+    assert manifest2["grid"] == {
+        "layout": 4, "rows": 2, "cols": 2, "images_only": False,
+    }
+
+
+def test_screen_display_rejects_invalid_layout(admin):
+    city_id = _create_city(admin, "Сетка-invalid")
+    device_id, _code = _create_screen(admin, "Касса-invalid", city_id)
+    resp = admin.post(
+        f"/screens/{device_id}/display",
+        data={"orientation": "landscape", "grid_layout": "5"},
+        follow_redirects=False,
+    )
+    assert "err=" in resp.headers["location"]
+
+
 def test_upload_self_heals_missing_media_dir(admin):
     """Загрузка не падает, если каталог media исчез (пересоздание тома и т.п.)."""
     import shutil as _sh
@@ -488,6 +533,103 @@ def test_transcode_incompatible_video(admin):
         assert mf.transcode_status == "done", mf.compat_warning
         assert mf.video_codec == "h264"
         assert mf.compatible is True
+
+
+def _make_test_mp4(tmp_path, extra_args, duration=1):
+    """Генерирует тестовый MP4 (testsrc); skip, если нет ffmpeg/кодека."""
+    import shutil as _shutil
+    import subprocess
+
+    import pytest
+
+    if _shutil.which("ffmpeg") is None:
+        pytest.skip("ffmpeg недоступен")
+    path = tmp_path / "probe.mp4"
+    proc = subprocess.run(
+        ["ffmpeg", "-v", "error", "-y",
+         "-f", "lavfi", "-i", f"testsrc=duration={duration}:size=640x360:rate=25",
+         *extra_args, str(path)],
+        capture_output=True, timeout=120,
+    )
+    if proc.returncode != 0:
+        pytest.skip(f"ffmpeg не собрал тестовое видео: {proc.stderr.decode()[-200:]}")
+    return path
+
+
+def test_probe_flags_high_bitrate_video(tmp_path, monkeypatch):
+    """Совместимое по формату, но тяжёлое видео помечается на сжатие."""
+    from app import config, media
+
+    path = _make_test_mp4(tmp_path, ["-c:v", "libx264", "-preset", "ultrafast",
+                                     "-qp", "0", "-pix_fmt", "yuv420p"])
+    monkeypatch.setattr(config, "MAX_VIDEO_MBPS", 0.1)
+    attrs = media._probe_video(path, "a" * 64)
+    assert attrs["compatible"] is False
+    assert "битрейт" in attrs["compat_warning"]
+
+
+def test_probe_flags_10bit_video(tmp_path):
+    """10-битное H.264 не декодируется аппаратно — уходит на перекодирование."""
+    from app import media
+
+    path = _make_test_mp4(tmp_path, ["-c:v", "libx264", "-preset", "ultrafast",
+                                     "-pix_fmt", "yuv420p10le"])
+    attrs = media._probe_video(path, "b" * 64)
+    assert attrs["compatible"] is False
+    assert "8-бит" in attrs["compat_warning"]
+
+
+def test_probe_flags_high_level_video(tmp_path):
+    """H.264 level выше 4.1 — вне потолка декодера RPi."""
+    from app import media
+
+    path = _make_test_mp4(tmp_path, ["-c:v", "libx264", "-preset", "ultrafast",
+                                     "-pix_fmt", "yuv420p", "-level", "5.1"])
+    attrs = media._probe_video(path, "c" * 64)
+    assert attrs["compatible"] is False
+    assert "level 5.1" in attrs["compat_warning"]
+
+
+def test_heavy_video_auto_compressed(admin, monkeypatch, tmp_path):
+    """Тяжёлый ролик сжимается воркером и проходит повторную проверку."""
+    import time as _time
+
+    from app import config
+
+    monkeypatch.setattr(config, "MAX_VIDEO_MBPS", 1.0)
+    path = _make_test_mp4(tmp_path, ["-c:v", "libx264", "-preset", "ultrafast",
+                                     "-qp", "0", "-pix_fmt", "yuv420p"],
+                          duration=2)
+    orig_size = path.stat().st_size
+    city_id = _create_city(admin, "Тяжёлое видео")
+    resp = admin.post(
+        "/publish",
+        files=[("files", ("heavy.mp4", path.read_bytes(), "video/mp4"))],
+        data={"city": [str(city_id)]},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+
+    with SessionLocal() as db:
+        poster = db.query(Poster).filter(Poster.name == "heavy").one()
+        media_id = poster.media_id
+        # Воркер мог уже взять задачу — важно, что сжатие запущено
+        assert db.get(MediaFile, media_id).transcode_status in (
+            "pending", "running", "done")
+
+    deadline = _time.monotonic() + 120
+    while _time.monotonic() < deadline:
+        with SessionLocal() as db:
+            mf = db.get(MediaFile, media_id)
+            if mf.transcode_status in ("done", "failed"):
+                break
+        _time.sleep(1)
+
+    with SessionLocal() as db:
+        mf = db.get(MediaFile, media_id)
+        assert mf.transcode_status == "done", mf.compat_warning
+        assert mf.compatible is True
+        assert mf.size_bytes < orig_size  # реально сжалось
 
 
 # ------------------------------------------------ v0.4: плейлисты, группы,

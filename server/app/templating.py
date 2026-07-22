@@ -4,6 +4,7 @@ from pathlib import Path
 from fastapi.templating import Jinja2Templates
 
 from . import config
+from .grid import LAYOUTS, grid_dims
 
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 
@@ -70,6 +71,8 @@ templates.env.filters["weekdays"] = _fmt_weekdays
 templates.env.filters["schedule"] = _fmt_schedule
 templates.env.globals["offline_after"] = config.OFFLINE_AFTER_SEC
 templates.env.globals["WEEKDAY_NAMES"] = _WEEKDAYS
+templates.env.globals["GRID_LAYOUTS"] = LAYOUTS
+templates.env.globals["grid_dims"] = grid_dims
 
 POSTER_STATUS = {
     "active": ("Активна", "ok"),

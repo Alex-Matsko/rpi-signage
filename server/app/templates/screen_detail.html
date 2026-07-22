@@ -105,6 +105,82 @@
   </div>
 </div>
 
+<div class="panel">
+  <div class="p-head"><h3>Раскладка экрана</h3></div>
+  <div class="p-body">
+    <form method="post" action="/screens/{{ device.id }}/display" id="display-form">
+      <span class="label">Ориентация</span>
+      <div class="orient-picker" id="orient-picker">
+        <label class="orient-opt">
+          <input type="radio" name="orientation" value="landscape"
+                 {{ 'checked' if device.orientation != 'portrait' }}>
+          <span class="card"><i class="orient-icon landscape"></i>Горизонтальная</span>
+        </label>
+        <label class="orient-opt">
+          <input type="radio" name="orientation" value="portrait"
+                 {{ 'checked' if device.orientation == 'portrait' }}>
+          <span class="card"><i class="orient-icon portrait"></i>Вертикальная</span>
+        </label>
+      </div>
+
+      <span class="label" style="margin-top:14px">Сколько афиш одновременно на экране</span>
+      <div class="layout-picker" id="layout-picker">
+        {% for n in GRID_LAYOUTS %}
+        {% set r, c = grid_dims(n, device.orientation) %}
+        <label class="layout-opt">
+          <input type="radio" name="grid_layout" value="{{ n }}"
+                 {{ 'checked' if device.grid_layout == n }}>
+          <span class="card">
+            <span class="layout-icon" data-layout="{{ n }}"
+                  style="grid-template-columns:repeat({{ c }},1fr);grid-template-rows:repeat({{ r }},1fr)">
+              {% for _ in range(r * c) %}<i></i>{% endfor %}
+            </span>
+            <span class="n">{{ n }}</span>
+          </span>
+        </label>
+        {% endfor %}
+      </div>
+
+      <label style="margin-top:14px;display:flex;gap:8px;align-items:flex-start">
+        <input type="checkbox" name="grid_images_only" style="margin-top:2px"
+               {{ 'checked' if device.grid_images_only }}>
+        <span>Показывать сеткой только статичные изображения
+          <div class="muted small">Пока включено — при раскладке из нескольких ячеек видео
+            на этот экран не выводится (см. предупреждение ниже, если оно есть). Если
+            выключить — видео тоже будут участвовать в сетке (несколько видео разом), но
+            это ощутимая нагрузка на аппаратный декодер Raspberry Pi — у RPi 2/3 обычно
+            только один декодер H.264, и параллельный декод нескольких видео может
+            тормозить или не работать вовсе.</div>
+        </span>
+      </label>
+
+      <button type="submit" class="btn primary" style="margin-top:14px">Сохранить раскладку</button>
+    </form>
+  </div>
+</div>
+<script>
+  (function () {
+    // Дублирует server/app/grid.py:grid_dims — только для мгновенного
+    // предпросмотра значков при клике на ориентацию, без перезагрузки страницы.
+    var LANDSCAPE_DIMS = {1: [1, 1], 2: [1, 2], 3: [1, 3], 4: [2, 2], 6: [2, 3], 8: [2, 4]};
+    var form = document.getElementById('display-form');
+    function applyPreview() {
+      var portrait = form.orientation.value === 'portrait';
+      document.querySelectorAll('.layout-icon').forEach(function (el) {
+        var n = el.dataset.layout;
+        var rc = LANDSCAPE_DIMS[n] || [1, 1];
+        var rows = rc[0], cols = rc[1];
+        if (portrait) { var t = rows; rows = cols; cols = t; }
+        el.style.gridTemplateColumns = 'repeat(' + cols + ',1fr)';
+        el.style.gridTemplateRows = 'repeat(' + rows + ',1fr)';
+      });
+    }
+    form.querySelectorAll('input[name=orientation]').forEach(function (r) {
+      r.addEventListener('change', applyPreview);
+    });
+  })();
+</script>
+
 {% if device.token_hash %}
 <div class="panel"><div class="p-body inline-form" style="justify-content:space-between">
   <div>
@@ -121,6 +197,11 @@
 {% endif %}
 
 <h2>Ротация экрана ({{ manifest['items']|length }})</h2>
+{% if hidden_video_count %}
+<div class="flash warn">⚠ {{ hidden_video_count }} видео из ротации не показывается на этом
+  экране: включена сетка «только статичные изображения» из нескольких ячеек. Снимите
+  галочку выше, чтобы видео тоже участвовало в сетке, или переключите раскладку на «1».</div>
+{% endif %}
 <table class="table">
   <tr><th>#</th><th>Афиша</th><th>Тип</th><th>Длительность</th><th>Действует до</th></tr>
   {% for item in manifest['items'] %}

@@ -33,7 +33,7 @@ import urllib.request
 from datetime import datetime
 from pathlib import Path
 
-AGENT_VERSION = "0.13.0"
+AGENT_VERSION = "0.14.0"
 
 log = logging.getLogger("signage")
 
@@ -388,6 +388,9 @@ class State:
         self.last_server_ok: float = 0.0
         # Немедленный повторный опрос манифеста (кнопка «отправить афиши»)
         self.resync = threading.Event()
+        # Ориентация экрана и раскладка одновременного показа (из манифеста)
+        self.orientation = "landscape"
+        self.grid = {"cells": 1, "rows": 1, "cols": 1, "images_only": True}
 
     def note_server_ok(self) -> None:
         self.last_server_ok = time.time()
@@ -400,13 +403,19 @@ class State:
         if self.manifest_path.exists():
             try:
                 data = json.loads(self.manifest_path.read_text())
-                self.apply_manifest(data.get("items", []))
+                self.apply_manifest(data.get("items", []),
+                                    data.get("orientation", "landscape"),
+                                    data.get("grid"))
                 log.info("Загружен сохранённый манифест: %d элементов",
                          len(self.items))
             except (json.JSONDecodeError, OSError) as e:
                 log.warning("Не удалось прочитать сохранённый манифест: %s", e)
 
-    def apply_manifest(self, items: list[dict]) -> None:
+    def apply_manifest(self, items: list[dict], orientation: str = "landscape",
+                       grid: dict | None = None) -> None:
+        grid = grid or {}
+        rows = grid.get("rows") or 1
+        cols = grid.get("cols") or 1
         with self.lock:
             self.cache_total = len(items)
             ready = []
@@ -418,6 +427,11 @@ class State:
                     ready.append({**item, "path": str(path)})
             self.cache_done = done
             self.items = ready
+            self.orientation = orientation or "landscape"
+            self.grid = {
+                "cells": max(1, rows * cols), "rows": rows, "cols": cols,
+                "images_only": grid.get("images_only", True),
+            }
         self.wake.set()
 
     def set_current(self, item: dict | None) -> None:
@@ -465,6 +479,22 @@ def item_is_active(item: dict, t: datetime) -> bool:
             return cur >= frm
         return cur < until
     return True
+
+
+def build_grid_steps(items: list[dict], cells: int,
+                     images_only: bool) -> list[list[dict]]:
+    """Группирует действующие элементы в шаги показа по `cells` ячеек.
+
+    cells=1 — обычная одиночная ротация (по элементу за шаг), без изменений.
+    При images_only=True видео полностью исключаются из ротации экрана —
+    на сеточном экране показываются только статичные изображения.
+    """
+    if cells <= 1:
+        return [[item] for item in items]
+    pool = [i for i in items if not images_only or i["kind"] == "image"]
+    if not pool:
+        return []
+    return [pool[i:i + cells] for i in range(0, len(pool), cells)]
 
 
 # ---------------------------------------------------------------- сервер
@@ -582,6 +612,13 @@ class MockPlayer:
         log.info("[mock] ▶ %s (%s, %s сек)", item["name"], item["kind"], duration)
         stop.wait(timeout=duration)
 
+    def play_grid(self, items: list[dict], rows: int, cols: int,
+                  stop: threading.Event) -> None:
+        duration = max((i.get("duration") or 10) for i in items)
+        names = ", ".join(i["name"] for i in items)
+        log.info("[mock] ▶ сетка %dx%d: %s (%s сек)", rows, cols, names, duration)
+        stop.wait(timeout=duration)
+
     def play_idle(self, stop: threading.Event, placeholder: Path | None) -> None:
         log.info("[mock] ▶ нет контента (заставка)")
         stop.wait(timeout=10)
@@ -598,6 +635,9 @@ class MockPlayer:
 
     def set_audio_device(self, device: str) -> None:
         log.info("[mock] аудиовыход → %s", device or "авто")
+
+    def set_orientation(self, orientation: str) -> None:
+        log.info("[mock] ориентация → %s", orientation)
 
     def shutdown(self) -> None:
         pass
@@ -628,6 +668,11 @@ class MpvPlayer:
         self.extra_args = extra_args
         self.audio_device = audio_device      # применённое устройство
         self._desired_audio = audio_device    # выбранное в панели (др. поток)
+        self.orientation = "landscape"        # применённая ориентация
+        self._desired_orientation = "landscape"  # из последнего манифеста
+        # Состав сетки, применённый при последнем запуске mpv:
+        # (внешние файлы, lavfi-complex) либо None — обычный одиночный показ.
+        self._composition: tuple[tuple[str, ...], str] | None = None
         self.proc: subprocess.Popen | None = None
         self.sock: socket.socket | None = None
         self._req_id = 0
@@ -636,19 +681,42 @@ class MpvPlayer:
         """Смена аудиовыхода из веб-панели (перечитается плеером-потоком)."""
         self._desired_audio = device or ""
 
-    def _ensure_running(self) -> None:
-        # Аудиовыход сменили в панели — перезапустить mpv с новым устройством
-        if self._desired_audio != self.audio_device:
-            self.audio_device = self._desired_audio
-            self._close()
-        if self.proc is not None and self.proc.poll() is None and self.sock:
+    def set_orientation(self, orientation: str) -> None:
+        """Ориентация из манифеста (перечитается плеером-потоком)."""
+        self._desired_orientation = orientation or "landscape"
+
+    def _ensure_running(
+        self, composition: tuple[tuple[str, ...], str] | None = None
+    ) -> None:
+        """composition — (внешние файлы, lavfi-complex) для сетки, либо None
+        для обычного одиночного показа. Смена аудио/ориентации/состава сетки
+        требует перезапуска процесса mpv — сравнение с уже применённым."""
+        restart_needed = (
+            self._desired_audio != self.audio_device
+            or self._desired_orientation != self.orientation
+            or composition != self._composition
+            or self.proc is None or self.proc.poll() is not None
+            or not self.sock
+        )
+        if not restart_needed:
             return
+        self.audio_device = self._desired_audio
+        self.orientation = self._desired_orientation
+        self._composition = composition
         self._close()
         Path(self.socket_path).unlink(missing_ok=True)
         audio_args = ([f"--audio-device={self.audio_device}"]
                       if self.audio_device else [])
+        rotate_args = (["--video-rotate=90"]
+                      if self.orientation == "portrait" else [])
+        comp_args = []
+        if composition:
+            external_files, lavfi_complex = composition
+            comp_args = [f"--external-file={f}" for f in external_files]
+            comp_args += ["--audio=no", f"--lavfi-complex={lavfi_complex}"]
         cmd = ["mpv", f"--input-ipc-server={self.socket_path}",
-               *MPV_ARGS, *audio_args, *self.extra_args]
+               *MPV_ARGS, *audio_args, *rotate_args, *comp_args,
+               *self.extra_args]
         log.info("Запускаю mpv: %s", " ".join(cmd))
         self.proc = subprocess.Popen(
             cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -691,8 +759,10 @@ class MpvPlayer:
                         pass
 
     def _play_file(self, path: str, image_duration: float | None,
-                   timeout: float, stop: threading.Event) -> None:
-        self._ensure_running()
+                   timeout: float, stop: threading.Event,
+                   composition: tuple[tuple[str, ...], str] | None = None,
+                   stop_on_eof: bool = True) -> None:
+        self._ensure_running(composition)
         if image_duration is not None:
             self._send(["set_property", "image-display-duration",
                         image_duration])
@@ -700,7 +770,7 @@ class MpvPlayer:
         for event in self._events(timeout):
             if stop.is_set():
                 return
-            if event and event.get("event") == "end-file":
+            if stop_on_eof and event and event.get("event") == "end-file":
                 reason = event.get("reason", "")
                 if reason != "redirect":
                     return
@@ -713,6 +783,58 @@ class MpvPlayer:
                             timeout=duration + 30, stop=stop)
         except (OSError, RuntimeError, ConnectionError) as e:
             log.error("Ошибка mpv (%s), перезапуск: %s", item["name"], e)
+            self._close()
+            stop.wait(timeout=3)
+
+    # Опорный размер ячейки сетки (композиция всё равно растягивается mpv
+    # на реальное разрешение экрана при полноэкранном выводе).
+    GRID_CELL_W = 960
+    GRID_CELL_H = 540
+
+    def play_grid(self, items: list[dict], rows: int, cols: int,
+                  stop: threading.Event) -> None:
+        """Показывает несколько афиш одновременно на сетке rows×cols.
+
+        Длительность шага контролирует сам агент (timeout ниже), а не
+        внутреннее завершение файла в mpv — иначе более короткий ролик или
+        стандартная 5-секундная длительность показа картинки в mpv
+        завершили бы композицию раньше срока. Поэтому «главным» файлом
+        (--loadfile) выбирается элемент с наибольшей длительностью в шаге,
+        а --lavfi-complex/--external-file собираются под перезапуск
+        процесса — живая подмена состава сетки без перезапуска ненадёжна
+        (проверено: mpv может показать закешированный кадр от предыдущего
+        файла).
+        """
+        cells = rows * cols
+        cw, ch = self.GRID_CELL_W, self.GRID_CELL_H
+        duration = max((i.get("duration") or 10) for i in items)
+        primary = max(items, key=lambda i: i.get("duration") or 10)
+        ordered = [primary] + [i for i in items if i is not primary]
+        graph_parts, cell_labels = [], []
+        for idx in range(cells):
+            label = f"cell{idx}"
+            if idx < len(ordered):
+                vid = "vid1" if idx == 0 else f"vid{idx + 1}"
+                graph_parts.append(
+                    f"[{vid}]scale={cw}:{ch}:force_original_aspect_ratio=decrease,"
+                    f"pad={cw}:{ch}:(ow-iw)/2:(oh-ih)/2:color=black[{label}]"
+                )
+            else:
+                graph_parts.append(f"color=c=black:s={cw}x{ch}:d=9999[{label}]")
+            cell_labels.append(f"[{label}]")
+        graph_parts.append(
+            f"{''.join(cell_labels)}xstack=inputs={cells}:grid={cols}x{rows}[vo]"
+        )
+        composition = (
+            tuple(i["path"] for i in ordered[1:cells]),
+            ";".join(graph_parts),
+        )
+        try:
+            self._play_file(ordered[0]["path"], image_duration=99999,
+                            timeout=duration, stop=stop,
+                            composition=composition, stop_on_eof=False)
+        except (OSError, RuntimeError, ConnectionError) as e:
+            log.error("Ошибка mpv (сетка), перезапуск: %s", e)
             self._close()
             stop.wait(timeout=3)
 
@@ -1070,7 +1192,9 @@ def sync_loop(client: ServerClient, state: State, poll_interval: int,
             version = manifest.get("manifest_version")
             poll_interval = manifest.get("poll_interval", poll_interval)
             items = manifest.get("items", [])
-            state.apply_manifest(items)  # сразу учесть удалённые элементы
+            orientation = manifest.get("orientation", "landscape")
+            grid = manifest.get("grid")
+            state.apply_manifest(items, orientation, grid)  # сразу учесть удалённые элементы
 
             wanted = {i["sha256"] for i in items}
             for item in items:
@@ -1082,7 +1206,7 @@ def sync_loop(client: ServerClient, state: State, poll_interval: int,
                 log.info("Скачиваю %s (%s)", item["name"], item["sha256"][:12])
                 try:
                     client.download(item["url"], dest)
-                    state.apply_manifest(items)
+                    state.apply_manifest(items, orientation, grid)
                 except Exception as e:
                     log.error("Не удалось скачать %s: %s", item["name"], e)
 
@@ -1136,7 +1260,7 @@ def heartbeat_loop(client: ServerClient, state: State,
 
 def playback_loop(player, state: State, placeholder: Path | None,
                   awaiting_bg: Path | None, stop: threading.Event) -> None:
-    """Крутит по кругу действующие элементы манифеста.
+    """Крутит по кругу действующие элементы манифеста (одиночно или сеткой).
 
     Пока устройство не привязано к серверу (`state.bound` ложно), вместо
     обычной заставки «нет контента» показываем экран «ожидает подключения»
@@ -1144,18 +1268,28 @@ def playback_loop(player, state: State, placeholder: Path | None,
     """
     index = 0
     while not stop.is_set():
+        with state.lock:
+            grid = dict(state.grid)
+            orientation = state.orientation
+        player.set_orientation(orientation)
         items = state.playable_items()
-        if not items:
+        steps = build_grid_steps(items, grid["cells"], grid["images_only"])
+        if not steps:
             state.set_current(None)
             if state.bound:
                 player.play_idle(stop, placeholder)
             else:
                 player.play_awaiting(stop, awaiting_bg, state)
             continue
-        index = index % len(items)
-        item = items[index]
-        state.set_current(item)
-        player.play(item, stop)
+        index = index % len(steps)
+        step = steps[index]
+        if len(step) == 1:
+            state.set_current(step[0])
+            player.play(step[0], stop)
+        else:
+            names = ", ".join(i["name"] for i in step)
+            state.set_current({"name": names[:250], "sha256": step[0]["sha256"]})
+            player.play_grid(step, grid["rows"], grid["cols"], stop)
         index += 1
     player.shutdown()
 

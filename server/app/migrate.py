@@ -23,6 +23,9 @@ _COLUMNS = [
     ("devices", "screenshot_at", "DATETIME"),
     ("devices", "local_ip", "VARCHAR(45)"),
     ("devices", "web_port", "INTEGER"),
+    ("devices", "orientation", "VARCHAR(10) NOT NULL DEFAULT 'landscape'"),
+    ("devices", "grid_layout", "INTEGER NOT NULL DEFAULT 1"),
+    ("devices", "grid_images_only", "BOOLEAN NOT NULL DEFAULT 1"),
 ]
 
 # v0.1/v0.2 таблицы групп/плейлистов, оставшиеся от _migrate_groups_and_playlists

@@ -14,6 +14,7 @@ from ..deps import (
     check_city_access, check_device_access, current_user, require_admin,
     user_city_ids, visible_cities,
 )
+from ..grid import LAYOUTS
 from ..models import (
     City, Device, DeviceCommand, DeviceGroupMember, Playlist, PlaylistTarget,
     PosterTarget, User, UserCity,
@@ -100,10 +101,17 @@ def screen_page(
         .limit(8)
         .all()
     )
+    manifest = build_manifest(device, db)
+    hidden_video_count = 0
+    if device.grid_layout > 1 and device.grid_images_only:
+        hidden_video_count = sum(
+            1 for item in manifest["items"] if item["kind"] == "video"
+        )
     return templates.TemplateResponse(request, "screen_detail.html", {
         "user": user,
         "device": device,
-        "manifest": build_manifest(device, db),
+        "manifest": manifest,
+        "hidden_video_count": hidden_video_count,
         "cities": visible_cities(user, db),
         "server_agent_version": bundled_agent_version(),
         "offline_after": config.OFFLINE_AFTER_SEC,
@@ -254,6 +262,30 @@ def update_screen(
         device.city_id = city_id or None
     db.commit()
     return redirect(f"/screens/{device_id}", msg="Настройки экрана сохранены.")
+
+
+@router.post("/screens/{device_id}/display")
+def update_display(
+    device_id: int,
+    orientation: str = Form("landscape"),
+    grid_layout: int = Form(1),
+    grid_images_only: str | None = Form(None),
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    device = db.get(Device, device_id)
+    if device is None:
+        return redirect("/screens", err="Экран не найден.")
+    check_device_access(user, device, db)
+    if orientation not in ("landscape", "portrait"):
+        return redirect(f"/screens/{device_id}", err="Некорректная ориентация.")
+    if grid_layout not in LAYOUTS:
+        return redirect(f"/screens/{device_id}", err="Некорректная раскладка.")
+    device.orientation = orientation
+    device.grid_layout = grid_layout
+    device.grid_images_only = grid_images_only is not None
+    db.commit()
+    return redirect(f"/screens/{device_id}", msg="Раскладка экрана сохранена.")
 
 
 @router.post("/screens/{device_id}/repair")

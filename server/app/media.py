@@ -142,6 +142,9 @@ def _probe_video(path: Path, sha256: str) -> dict:
     height = int(video.get("height") or 0)
     duration = float(info.get("format", {}).get("duration") or 0) or None
     fps = _parse_fps(video.get("avg_frame_rate") or video.get("r_frame_rate"))
+    pix_fmt = video.get("pix_fmt") or ""
+    level = int(video.get("level") or 0)
+    mbps = _bitrate_mbps(video, info.get("format", {}), path, duration)
 
     warnings = []
     if codec != "h264":
@@ -152,6 +155,20 @@ def _probe_video(path: Path, sha256: str) -> dict:
         warnings.append(f"разрешение {width}x{height} — максимум 1920x1080")
     if fps and fps > 31:
         warnings.append(f"{fps:.0f} fps — максимум 30 fps")
+    if pix_fmt and pix_fmt not in ("yuv420p", "yuvj420p", "nv12"):
+        warnings.append(
+            f"формат пикселей {pix_fmt} — аппаратный декодер "
+            "поддерживает только 8-бит 4:2:0 (yuv420p)"
+        )
+    if codec == "h264" and level > 41:
+        warnings.append(
+            f"H.264 level {level / 10:.1f} — декодер RPi поддерживает до 4.1"
+        )
+    if mbps and mbps > config.MAX_VIDEO_MBPS:
+        warnings.append(
+            f"битрейт {mbps:.0f} Мбит/с — тяжело для RPi 2/3 "
+            f"(лимит {config.MAX_VIDEO_MBPS:.0f}), будет сжато"
+        )
 
     _video_thumbnail(path, sha256)
 
@@ -172,11 +189,17 @@ def transcode_video(src: Path, dst: Path) -> None:
     """Перекодирует видео в совместимый формат: H.264 ≤1080p ≤30fps, faststart.
 
     Разрешение уменьшается только если превышает 1920×1080 (без апскейла).
+    Битрейт ограничивается заметно ниже MAX_VIDEO_MBPS, чтобы результат
+    гарантированно прошёл повторную проверку и не тормозил на RPi 2/3;
+    profile high + level 4.0 — потолок аппаратного декодера VideoCore IV.
     """
+    maxrate = max(2, round(config.MAX_VIDEO_MBPS * 0.6))
     cmd = [
         "ffmpeg", "-v", "error", "-y", "-i", str(src),
         "-map", "0:v:0", "-map", "0:a:0?",
         "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+        "-maxrate", f"{maxrate}M", "-bufsize", f"{maxrate}M",
+        "-profile:v", "high", "-level", "4.0",
         "-pix_fmt", "yuv420p",
         "-vf",
         "scale=w='min(1920,iw)':h='min(1080,ih)':"
@@ -213,6 +236,23 @@ def _parse_fps(rate: str | None) -> float | None:
         return float(num) / float(den or 1)
     except (ValueError, ZeroDivisionError):
         return None
+
+
+def _bitrate_mbps(video: dict, fmt: dict, path: Path,
+                  duration: float | None) -> float | None:
+    """Битрейт видео в Мбит/с: поток → контейнер → размер/длительность."""
+    for raw in (video.get("bit_rate"), fmt.get("bit_rate")):
+        try:
+            if raw and float(raw) > 0:
+                return float(raw) / 1_000_000
+        except (TypeError, ValueError):
+            pass
+    if duration and duration > 0:
+        try:
+            return path.stat().st_size * 8 / duration / 1_000_000
+        except OSError:
+            pass
+    return None
 
 
 def _video_thumbnail(path: Path, sha256: str) -> None:
