@@ -186,19 +186,22 @@ def _compose_grid_items(items: list[dict], rows: int, cols: int,
     for members_all in buckets.values():
         for chunk in (members_all[i:i + cells]
                       for i in range(0, len(members_all), cells)):
-            if len(chunk) == 1:
-                result.append(chunk[0])
-                continue
+            single = len(chunk) == 1
             try:
+                # Неполный последний шаг из одной афиши — во весь экран
+                # (1×1), а не в ячейку с пустым соседом
                 comp = media.compose_grid_image(
-                    [m["sha256"] for m in chunk], rows, cols, orientation)
+                    [m["sha256"] for m in chunk],
+                    1 if single else rows, 1 if single else cols,
+                    orientation)
             except media.MediaError:
-                result.extend(chunk)  # не собралось — показываем по одной
+                result.extend(chunk)  # не собралось — показываем оригиналы
                 continue
             expires = [m["expires_at"] for m in chunk if m["expires_at"]]
             first = chunk[0]
-            result.append({
-                "name": "Сетка: " + " + ".join(m["name"] for m in chunk)[:230],
+            item = {
+                "name": first["name"] if single else
+                    "Сетка: " + " + ".join(m["name"] for m in chunk)[:230],
                 "kind": "image",
                 "mime": "image/jpeg",
                 "sha256": comp["sha256"],
@@ -210,7 +213,10 @@ def _compose_grid_items(items: list[dict], rows: int, cols: int,
                 "daily_from": first["daily_from"],
                 "daily_until": first["daily_until"],
                 "weekdays": first["weekdays"],
-            })
+            }
+            if single:
+                item["poster_id"] = first["poster_id"]
+            result.append(item)
     return result
 
 

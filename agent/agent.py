@@ -33,7 +33,7 @@ import urllib.request
 from datetime import datetime
 from pathlib import Path
 
-AGENT_VERSION = "0.16.0"
+AGENT_VERSION = "0.17.0"
 
 log = logging.getLogger("signage")
 
@@ -44,9 +44,15 @@ HEARTBEAT_SEC = 30
 DOWNLOAD_CHUNK = 256 * 1024
 MPV_ARGS = [
     "--idle=yes", "--fullscreen", "--no-terminal", "--no-osc", "--no-osd-bar",
-    # keep-open=no — сразу переходим к следующему файлу по окончании текущего
-    # (keep-open=yes в v0.10 приводил к зависанию ~20с между афишами).
-    "--keep-open=no", "--loop-file=no", "--hwdec=auto-safe",
+    # keep-open=yes — последний кадр остаётся на экране, пока не готов первый
+    # кадр следующего файла: смена афиш без чёрного мигания. Зависание ~20с,
+    # из-за которого этот режим откатили в v0.11, было ошибкой ожидания:
+    # с keep-open событие end-file на конце файла не приходит — теперь агент
+    # ждёт свойство eof-reached (видео) или точный таймер (картинки).
+    "--keep-open=yes", "--loop-file=no", "--hwdec=auto-safe",
+    # Картинку не завершает сам mpv — момент смены афиши выбирает агент
+    # (loadfile replace поверх удерживаемого кадра).
+    "--image-display-duration=inf",
     # force-window держит чёрное окно mpv между файлами, чтобы в момент смены
     # контента не просвечивал системный терминал.
     "--force-window=yes",
@@ -511,15 +517,21 @@ def build_grid_graph(n_items: int, rows: int, cols: int,
     cw, ch = canvas_w // cols, canvas_h // rows
     cells = rows * cols
     graph_parts, cell_labels = [], []
+    # Дешёвое размытие для фона (без нагрузки на CPU устройства):
+    # сжать в ~16 раз и растянуть обратно
+    bw, bh = max(2, cw // 16), max(2, ch // 16)
     for idx in range(cells):
         label = f"cell{idx}"
         if idx < n_items:
             vid = f"vid{idx + 1}"
-            # «cover»: контент заполняет ячейку целиком без чёрных полей —
-            # пропорции сохраняются, выступающие края обрезаются поровну
+            # Контент виден целиком (вписан без обрезания), пустое место
+            # ячейки заполняет его же растянутая размытая копия
             graph_parts.append(
-                f"[{vid}]scale={cw}:{ch}:force_original_aspect_ratio=increase,"
-                f"crop={cw}:{ch}[{label}]"
+                f"[{vid}]split[a{idx}][b{idx}];"
+                f"[a{idx}]scale={bw}:{bh},scale={cw}:{ch}[bg{idx}];"
+                f"[b{idx}]scale={cw}:{ch}:force_original_aspect_ratio="
+                f"decrease[fg{idx}];"
+                f"[bg{idx}][fg{idx}]overlay=(W-w)/2:(H-h)/2[{label}]"
             )
         else:
             graph_parts.append(f"color=c=black:s={cw}x{ch}:d=9999[{label}]")
@@ -773,6 +785,8 @@ class MpvPlayer:
         self.sock.connect(self.socket_path)
         self.sock.settimeout(1.0)
         self._buf = b""
+        # С keep-open конец видео не порождает end-file — следим за свойством
+        self._send(["observe_property", 1, "eof-reached"])
 
     def _send(self, command: list) -> None:
         self._req_id += 1
@@ -801,29 +815,49 @@ class MpvPlayer:
                     except json.JSONDecodeError:
                         pass
 
-    def _play_file(self, path: str, image_duration: float | None,
-                   timeout: float, stop: threading.Event,
+    def _play_file(self, path: str, timeout: float, stop: threading.Event,
                    composition: tuple[tuple[str, ...], str] | None = None,
-                   stop_on_eof: bool = True) -> None:
+                   wait_eof: bool = False) -> None:
+        """Показывает файл и ждёт момент смены.
+
+        Возврат из метода — сигнал «пора показывать следующее»; сам кадр
+        остаётся на экране (keep-open), поэтому следующий loadfile replace
+        сменяет афишу без чёрного мигания. Картинки живут ровно timeout
+        секунд (image-display-duration=inf — mpv их не завершает), видео —
+        до свойства eof-reached (end-file при keep-open не приходит).
+        """
         self._ensure_running(composition)
-        if image_duration is not None:
-            self._send(["set_property", "image-display-duration",
-                        image_duration])
         self._send(["loadfile", path, "replace"])
+        # До file-loaded нового файла идут хвосты предыдущего (end-file от
+        # replace, стартовое значение eof-reached) — их нужно пропустить,
+        # иначе смена произойдёт мгновенно.
+        loaded = False
         for event in self._events(timeout):
             if stop.is_set():
                 return
-            if stop_on_eof and event and event.get("event") == "end-file":
-                reason = event.get("reason", "")
-                if reason != "redirect":
-                    return
+            if event is None:
+                continue
+            kind = event.get("event")
+            if not loaded:
+                if kind == "file-loaded":
+                    loaded = True
+                elif kind == "end-file" and event.get("reason") == "error":
+                    return  # файл не открылся — пропускаем афишу
+                continue
+            if kind == "end-file" and event.get("reason") != "redirect":
+                return  # при keep-open это только ошибка/стоп
+            if (wait_eof and kind == "property-change"
+                    and event.get("name") == "eof-reached"
+                    and event.get("data") is True):
+                return
 
     def play(self, item: dict, stop: threading.Event) -> None:
         duration = item.get("duration") or 10
-        image_duration = duration if item["kind"] == "image" else None
+        is_image = item["kind"] == "image"
         try:
-            self._play_file(item["path"], image_duration,
-                            timeout=duration + 30, stop=stop)
+            self._play_file(item["path"],
+                            timeout=duration if is_image else duration + 30,
+                            stop=stop, wait_eof=not is_image)
         except (OSError, RuntimeError, ConnectionError) as e:
             log.error("Ошибка mpv (%s), перезапуск: %s", item["name"], e)
             self._close()
@@ -853,9 +887,8 @@ class MpvPlayer:
         )
         composition = (tuple(i["path"] for i in ordered[1:cells]), graph)
         try:
-            self._play_file(ordered[0]["path"], image_duration=99999,
-                            timeout=duration, stop=stop,
-                            composition=composition, stop_on_eof=False)
+            self._play_file(ordered[0]["path"], timeout=duration, stop=stop,
+                            composition=composition)
         except (OSError, RuntimeError, ConnectionError) as e:
             log.error("Ошибка mpv (сетка), перезапуск: %s", e)
             self._close()
@@ -864,8 +897,7 @@ class MpvPlayer:
     def play_idle(self, stop: threading.Event, placeholder: Path | None) -> None:
         try:
             if placeholder and placeholder.exists():
-                self._play_file(str(placeholder), image_duration=15,
-                                timeout=20, stop=stop)
+                self._play_file(str(placeholder), timeout=15, stop=stop)
             else:
                 self._ensure_running()
                 self._send(["stop"])
@@ -892,7 +924,8 @@ class MpvPlayer:
         try:
             self._ensure_running()
             if background and background.exists():
-                self._send(["set_property", "image-display-duration", 20])
+                # image-display-duration глобально inf (бесшовные переходы) —
+                # фон держится сам, завершать его не нужно
                 self._send(["loadfile", str(background), "replace"])
             else:
                 self._send(["stop"])

@@ -319,22 +319,30 @@ def compose_grid_image(shas: list[str], rows: int, cols: int,
         for idx in range(cells):
             label = f"cell{idx}"
             if idx < len(shas):
-                # «cover»: афиша заполняет ячейку целиком без чёрных полей —
-                # пропорции сохраняются, выступающие края обрезаются поровну
+                # Афиша всегда видна целиком (вписана без обрезания), а
+                # пустое место ячейки заполняет её же растянутая размытая
+                # копия — ни чёрных полей, ни потери контента
                 parts.append(
-                    f"[{idx}:v]scale={cw}:{ch}:force_original_aspect_ratio="
-                    f"increase,crop={cw}:{ch}[{label}]"
+                    f"[{idx}:v]split[a{idx}][b{idx}];"
+                    f"[a{idx}]scale={cw}:{ch},gblur=sigma=24[bg{idx}];"
+                    f"[b{idx}]scale={cw}:{ch}:force_original_aspect_ratio="
+                    f"decrease[fg{idx}];"
+                    f"[bg{idx}][fg{idx}]overlay=(W-w)/2:(H-h)/2[{label}]"
                 )
             else:
                 parts.append(f"color=c=black:s={cw}x{ch}:d=1[{label}]")
             labels.append(f"[{label}]")
-        parts.append(
-            f"{''.join(labels)}xstack=inputs={cells}:grid={cols}x{rows}[vo]"
-        )
+        if cells > 1:
+            parts.append(
+                f"{''.join(labels)}xstack=inputs={cells}:grid={cols}x{rows}[vo]"
+            )
+            out_label = "[vo]"
+        else:
+            out_label = labels[0]  # xstack требует ≥2 входов
         tmp = out.with_suffix(".tmp.jpg")
         try:
             subprocess.run(
-                [*cmd, "-filter_complex", ";".join(parts), "-map", "[vo]",
+                [*cmd, "-filter_complex", ";".join(parts), "-map", out_label,
                  "-frames:v", "1", "-q:v", "3", "-update", "1", str(tmp)],
                 capture_output=True, text=True, timeout=120, check=True,
             )

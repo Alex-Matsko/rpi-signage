@@ -411,13 +411,17 @@ def test_grid_graph_landscape_no_transpose():
     g = agent.build_grid_graph(2, 1, 2, portrait=False)
     assert "xstack=inputs=2:grid=2x1[vo]" in g
     assert "transpose" not in g
-    assert "scale=960:1080" in g  # ячейка = половина холста 1920x1080
+    # афиша вписана целиком (ячейка = половина холста 1920x1080)…
+    assert "scale=960:1080:force_original_aspect_ratio=decrease" in g
+    # …а фон ячейки — её же размытая копия, без чёрных полей
+    assert "overlay=(W-w)/2:(H-h)/2" in g
+    assert "crop" not in g
 
 
 def test_grid_graph_portrait_has_transpose_and_portrait_canvas():
     g = agent.build_grid_graph(2, 2, 1, portrait=True)
     # холст 1080x1920, две ячейки друг под другом
-    assert "scale=1080:960" in g
+    assert "scale=1080:960:force_original_aspect_ratio=decrease" in g
     assert "xstack=inputs=2:grid=1x2[stacked]" in g
     # поворот запечён в граф: --video-rotate на lavfi-выход не действует
     assert "[stacked]transpose=1[vo]" in g
