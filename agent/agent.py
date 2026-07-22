@@ -33,7 +33,7 @@ import urllib.request
 from datetime import datetime
 from pathlib import Path
 
-AGENT_VERSION = "0.15.0"
+AGENT_VERSION = "0.16.0"
 
 log = logging.getLogger("signage")
 
@@ -515,9 +515,11 @@ def build_grid_graph(n_items: int, rows: int, cols: int,
         label = f"cell{idx}"
         if idx < n_items:
             vid = f"vid{idx + 1}"
+            # «cover»: контент заполняет ячейку целиком без чёрных полей —
+            # пропорции сохраняются, выступающие края обрезаются поровну
             graph_parts.append(
-                f"[{vid}]scale={cw}:{ch}:force_original_aspect_ratio=decrease,"
-                f"pad={cw}:{ch}:(ow-iw)/2:(oh-ih)/2:color=black[{label}]"
+                f"[{vid}]scale={cw}:{ch}:force_original_aspect_ratio=increase,"
+                f"crop={cw}:{ch}[{label}]"
             )
         else:
             graph_parts.append(f"color=c=black:s={cw}x{ch}:d=9999[{label}]")

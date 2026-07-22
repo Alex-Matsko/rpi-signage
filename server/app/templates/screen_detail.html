@@ -246,7 +246,8 @@
   {% for item in manifest['items'] %}
   <tr>
     <td>{{ loop.index }}</td>
-    <td><a href="/posters/{{ item.poster_id }}">{{ item.name }}</a></td>
+    <td>{% if item.poster_id %}<a href="/posters/{{ item.poster_id }}">{{ item.name }}</a>
+        {% else %}{{ item.name }} <span class="chip acc">композиция</span>{% endif %}</td>
     <td>{{ 'видео' if item.kind == 'video' else 'изображение' }}</td>
     <td>{{ ('%.0f сек'|format(item.duration)) if item.duration else '—' }}</td>
     <td>{{ item.expires_at or 'бессрочно' }}</td>

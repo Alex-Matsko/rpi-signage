@@ -7,7 +7,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import config, security, worker
+from . import config, media, security, worker
 from .db import Base, SessionLocal, engine
 from .deps import AuthRedirect
 from .migrate import rename_legacy_group_playlist_tables, run_migrations
@@ -17,7 +17,7 @@ from .routers import (
     publish, users,
 )
 
-APP_VERSION = "0.15.0"
+APP_VERSION = "0.16.0"
 
 
 def _bootstrap_admin() -> None:
@@ -52,6 +52,7 @@ def create_app() -> FastAPI:
     run_migrations(engine)
     _bootstrap_admin()
     worker.start()
+    media.cleanup_grid_composites()
 
     app = FastAPI(title="RPi Signage", version=APP_VERSION,
                   docs_url=None, redoc_url=None)

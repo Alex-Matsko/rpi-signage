@@ -423,9 +423,10 @@ def test_screen_display_settings_persist_and_reflect_in_manifest(admin, client):
 
     manifest = client.get("/api/agent/manifest", headers=headers).json()
     assert manifest["orientation"] == "portrait"
-    # layout=6 в portrait -> 3 строки x 2 колонки (landscape было бы 2x3)
+    # При «только статике» сетку собирает сервер (композиции) — агенту
+    # сообщается 1×1, чтобы он показывал их как одиночные афиши
     assert manifest["grid"] == {
-        "layout": 6, "rows": 3, "cols": 2, "images_only": True,
+        "layout": 6, "rows": 1, "cols": 1, "images_only": True,
     }
 
     # Снимаем чекбокс "только статика" — HTML-форма просто не шлёт поле
@@ -450,6 +451,65 @@ def test_screen_display_rejects_invalid_layout(admin):
         follow_redirects=False,
     )
     assert "err=" in resp.headers["location"]
+
+
+def test_static_grid_prerendered_composites(admin, client):
+    """При «только статике» сервер отдаёт агенту готовые картинки-сетки."""
+    import hashlib
+    import io as _io
+    import shutil as _shutil
+
+    import pytest
+    from PIL import Image as PILImage
+
+    if _shutil.which("ffmpeg") is None:
+        pytest.skip("ffmpeg недоступен")
+
+    city_id = _create_city(admin, "Композиции")
+    device_id, code = _create_screen(admin, "Касса-композиция", city_id)
+    headers = _register_agent(client, code)
+    admin.post(f"/screens/{device_id}/display",
+               data={"orientation": "landscape", "grid_layout": "2",
+                     "grid_images_only": "on"}, follow_redirects=False)
+    admin.post(
+        "/publish",
+        files=[
+            ("files", ("c-one.png", _png_bytes("red"), "image/png")),
+            ("files", ("c-two.png", _png_bytes("blue"), "image/png")),
+            ("files", ("c-three.png", _png_bytes("green"), "image/png")),
+        ],
+        data={"device": [str(device_id)]},
+        follow_redirects=False,
+    )
+
+    manifest = client.get("/api/agent/manifest", headers=headers).json()
+    # 3 картинки при 2 ячейках -> композиция из двух + одиночная третья
+    assert manifest["grid"] == {"layout": 2, "rows": 1, "cols": 1,
+                                "images_only": True}
+    assert len(manifest["items"]) == 2
+    comp = manifest["items"][0]
+    assert comp["name"].startswith("Сетка: ")
+    assert comp["kind"] == "image" and comp["mime"] == "image/jpeg"
+    assert comp["url"].startswith("/api/agent/grid/")
+    single = manifest["items"][1]
+    assert single["poster_id"]  # третья афиша осталась одиночной
+
+    # Композиция скачивается агентом, хеш совпадает, холст — весь экран
+    resp = client.get(comp["url"], headers=headers)
+    assert resp.status_code == 200
+    assert hashlib.sha256(resp.content).hexdigest() == comp["sha256"]
+    img = PILImage.open(_io.BytesIO(resp.content))
+    assert img.size == (1920, 1080)
+
+    # Вертикальная ориентация -> портретный холст композиции
+    admin.post(f"/screens/{device_id}/display",
+               data={"orientation": "portrait", "grid_layout": "2",
+                     "grid_images_only": "on"}, follow_redirects=False)
+    manifest = client.get("/api/agent/manifest", headers=headers).json()
+    comp2 = manifest["items"][0]
+    resp = client.get(comp2["url"], headers=headers)
+    img2 = PILImage.open(_io.BytesIO(resp.content))
+    assert img2.size == (1080, 1920)
 
 
 def test_upload_self_heals_missing_media_dir(admin):

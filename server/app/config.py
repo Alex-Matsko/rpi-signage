@@ -8,6 +8,8 @@ DB_DIR = DATA_DIR / "db"
 MEDIA_DIR = DATA_DIR / "media"
 THUMB_DIR = DATA_DIR / "thumbs"
 SHOT_DIR = DATA_DIR / "screenshots"
+# Готовые композиции сеток из статичных афиш (рендерятся сервером)
+GRID_DIR = DATA_DIR / "grid"
 DB_PATH = DB_DIR / "signage.db"
 SECRET_KEY_FILE = DATA_DIR / "secret_key"
 
@@ -48,5 +50,5 @@ def secret_key() -> str:
 
 
 def ensure_dirs() -> None:
-    for d in (DB_DIR, MEDIA_DIR, THUMB_DIR, SHOT_DIR):
+    for d in (DB_DIR, MEDIA_DIR, THUMB_DIR, SHOT_DIR, GRID_DIR):
         d.mkdir(parents=True, exist_ok=True)

@@ -82,6 +82,13 @@ if [[ -n "$WEB_PASSWORD" ]]; then
     --state-dir /var/lib/signage set-password --password "$WEB_PASSWORD"
 fi
 
+echo "==> Прячу системную консоль на экране…"
+# На ТВ не должны просвечивать мастер создания пользователя Raspberry Pi OS
+# (синий экран «please enter the username») и приглашение логина tty1 —
+# они видны в моменты, когда mpv перезапускается или ещё не поднялся.
+systemctl disable --now userconfig.service 2>/dev/null || true
+systemctl disable --now getty@tty1.service 2>/dev/null || true
+
 echo "==> Настраиваю systemd-сервис…"
 cat > /etc/systemd/system/signage-agent.service <<'UNIT'
 [Unit]

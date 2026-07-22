@@ -283,3 +283,98 @@ def _video_thumbnail(path: Path, sha256: str) -> None:
 def delete_media_files(sha256: str) -> None:
     media_path(sha256).unlink(missing_ok=True)
     thumb_path(sha256).unlink(missing_ok=True)
+
+
+# ------------------------------------------------ композиции сеток (статика)
+
+# Кеш хешей готовых композиций: имя файла -> (mtime, size, sha256)
+_grid_sha_cache: dict[str, tuple[float, int, str]] = {}
+
+
+def compose_grid_image(shas: list[str], rows: int, cols: int,
+                       orientation: str) -> dict:
+    """Склеивает статичные афиши в одну картинку-сетку (композицию).
+
+    Возвращает {"key", "path", "sha256", "size"}. Результат кешируется на
+    диске (GRID_DIR): ключ определяется составом, раскладкой и ориентацией,
+    поэтому повторные вызовы из manifest/heartbeat мгновенны. Композиция
+    отдаётся агенту как обычная одиночная афиша — на устройстве нет ни
+    склейки, ни перезапусков mpv между переходами.
+    """
+    canvas_w, canvas_h = (1080, 1920) if orientation == "portrait" \
+        else (1920, 1080)
+    cw, ch = canvas_w // cols, canvas_h // rows
+    cells = rows * cols
+    key = hashlib.sha256(
+        ("|".join(shas) + f":{rows}x{cols}:{orientation}").encode()
+    ).hexdigest()[:32]
+    out = config.GRID_DIR / f"grid-{key}.jpg"
+
+    if not out.exists():
+        config.ensure_dirs()
+        cmd = ["ffmpeg", "-v", "error", "-y"]
+        for sha in shas:
+            cmd += ["-i", str(media_path(sha))]
+        parts, labels = [], []
+        for idx in range(cells):
+            label = f"cell{idx}"
+            if idx < len(shas):
+                # «cover»: афиша заполняет ячейку целиком без чёрных полей —
+                # пропорции сохраняются, выступающие края обрезаются поровну
+                parts.append(
+                    f"[{idx}:v]scale={cw}:{ch}:force_original_aspect_ratio="
+                    f"increase,crop={cw}:{ch}[{label}]"
+                )
+            else:
+                parts.append(f"color=c=black:s={cw}x{ch}:d=1[{label}]")
+            labels.append(f"[{label}]")
+        parts.append(
+            f"{''.join(labels)}xstack=inputs={cells}:grid={cols}x{rows}[vo]"
+        )
+        tmp = out.with_suffix(".tmp.jpg")
+        try:
+            subprocess.run(
+                [*cmd, "-filter_complex", ";".join(parts), "-map", "[vo]",
+                 "-frames:v", "1", "-q:v", "3", "-update", "1", str(tmp)],
+                capture_output=True, text=True, timeout=120, check=True,
+            )
+        except subprocess.CalledProcessError as e:
+            tmp.unlink(missing_ok=True)
+            raise MediaError(
+                f"Сборка сетки не удалась: {(e.stderr or '').strip()[-200:]}"
+            ) from e
+        except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+            tmp.unlink(missing_ok=True)
+            raise MediaError(f"Сборка сетки не удалась: {e}") from e
+        tmp.rename(out)
+
+    # Отметка «композиция востребована» — раз в сутки, чтобы cleanup не
+    # удалил активную, а кеш хеша не сбрасывался на каждом опросе
+    import os as _os
+    import time as _time
+    st = out.stat()
+    if st.st_mtime < _time.time() - 86400:
+        _os.utime(out)
+        st = out.stat()
+    cached = _grid_sha_cache.get(out.name)
+    if cached and cached[0] == st.st_mtime and cached[1] == st.st_size:
+        sha = cached[2]
+    else:
+        sha = file_sha256(out)
+        _grid_sha_cache[out.name] = (st.st_mtime, st.st_size, sha)
+    return {"key": key, "path": out, "sha256": sha, "size": st.st_size}
+
+
+def cleanup_grid_composites(max_age_days: int = 14) -> None:
+    """Удаляет старые невостребованные композиции (актуальные пересоберутся)."""
+    import time as _time
+    cutoff = _time.time() - max_age_days * 86400
+    if not config.GRID_DIR.exists():
+        return
+    for f in config.GRID_DIR.glob("grid-*.jpg"):
+        try:
+            if f.stat().st_mtime < cutoff:
+                f.unlink()
+                _grid_sha_cache.pop(f.name, None)
+        except OSError:
+            pass

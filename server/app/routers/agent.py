@@ -135,6 +135,13 @@ def build_manifest(device: Device, db: Session) -> dict:
             "weekdays": poster.weekdays_mask or None,
         })
     rows, cols = grid_dims(device.grid_layout, device.orientation)
+    if device.grid_layout > 1 and device.grid_images_only:
+        # Статичные сетки склеиваются заранее на сервере: агент получает
+        # готовые картинки-композиции и показывает их как одиночные афиши —
+        # без перезапусков mpv между переходами (и без просвечивания
+        # консоли устройства). Видео на таком экране пропускается.
+        items = _compose_grid_items(items, rows, cols, device.orientation)
+        rows = cols = 1
     version = hashlib.sha256(
         json.dumps(
             {"items": items, "grid": [device.grid_layout, device.orientation,
@@ -156,6 +163,55 @@ def build_manifest(device: Device, db: Session) -> dict:
         },
         "items": items,
     }
+
+
+def _compose_grid_items(items: list[dict], rows: int, cols: int,
+                        orientation: str) -> list[dict]:
+    """Группирует статичные афиши в готовые композиции по rows×cols.
+
+    Чтобы расписание соблюдалось офлайн, в одну композицию попадают только
+    афиши с одинаковым окном показа/днями недели и общим будущим стартом;
+    срок действия композиции — минимальный из сроков участниц. Видео
+    пропускаются (семантика «только статичные изображения»).
+    """
+    cells = rows * cols
+    images = [i for i in items if i["kind"] == "image"]
+    buckets: dict[tuple, list[dict]] = {}
+    for item in images:
+        key = (item["starts_at"] or "", item["daily_from"] or "",
+               item["daily_until"] or "", item["weekdays"] or 0)
+        buckets.setdefault(key, []).append(item)
+
+    result = []
+    for members_all in buckets.values():
+        for chunk in (members_all[i:i + cells]
+                      for i in range(0, len(members_all), cells)):
+            if len(chunk) == 1:
+                result.append(chunk[0])
+                continue
+            try:
+                comp = media.compose_grid_image(
+                    [m["sha256"] for m in chunk], rows, cols, orientation)
+            except media.MediaError:
+                result.extend(chunk)  # не собралось — показываем по одной
+                continue
+            expires = [m["expires_at"] for m in chunk if m["expires_at"]]
+            first = chunk[0]
+            result.append({
+                "name": "Сетка: " + " + ".join(m["name"] for m in chunk)[:230],
+                "kind": "image",
+                "mime": "image/jpeg",
+                "sha256": comp["sha256"],
+                "size": comp["size"],
+                "url": f"/api/agent/grid/{comp['key']}",
+                "duration": max(m["duration"] or 10 for m in chunk),
+                "starts_at": first["starts_at"],
+                "expires_at": min(expires) if expires else None,
+                "daily_from": first["daily_from"],
+                "daily_until": first["daily_until"],
+                "weekdays": first["weekdays"],
+            })
+    return result
 
 
 class RegisterIn(BaseModel):
@@ -199,6 +255,21 @@ def download_media(
     if mf is None or not path.exists():
         raise HTTPException(status_code=404, detail="media not found")
     return FileResponse(path, media_type=mf.mime, filename=mf.orig_name)
+
+
+@router.get("/grid/{key}")
+def download_grid_composite(
+    key: str,
+    device: Device = Depends(current_device),
+):
+    """Готовая картинка-композиция сетки (собрана сервером из афиш)."""
+    if not re.fullmatch(r"[0-9a-f]{32}", key):
+        raise HTTPException(status_code=404, detail="grid not found")
+    path = config.GRID_DIR / f"grid-{key}.jpg"
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="grid not found")
+    return FileResponse(path, media_type="image/jpeg",
+                        filename=f"grid-{key}.jpg")
 
 
 class CurrentIn(BaseModel):

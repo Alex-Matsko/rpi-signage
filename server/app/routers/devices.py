@@ -19,7 +19,9 @@ from ..models import (
     City, Device, DeviceCommand, DeviceGroupMember, Playlist, PlaylistTarget,
     PosterTarget, User, UserCity,
 )
-from ..routers.agent import build_manifest, bundled_agent_version
+from ..routers.agent import (
+    build_manifest, bundled_agent_version, device_posters,
+)
 from ..routers.groups import device_groups
 from ..security import read_session
 from ..templating import templates
@@ -104,8 +106,14 @@ def screen_page(
     manifest = build_manifest(device, db)
     hidden_video_count = 0
     if device.grid_layout > 1 and device.grid_images_only:
+        # По манифесту не посчитать: при «только статике» видео в него
+        # вообще не попадают — считаем по назначенным афишам
+        from ..models import now as model_now
+        t = model_now()
         hidden_video_count = sum(
-            1 for item in manifest["items"] if item["kind"] == "video"
+            1 for p in device_posters(device, db)
+            if p.enabled and p.media.kind == "video"
+            and not (p.expires_at and p.expires_at <= t)
         )
     return templates.TemplateResponse(request, "screen_detail.html", {
         "user": user,
