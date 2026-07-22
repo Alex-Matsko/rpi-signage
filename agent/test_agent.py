@@ -407,6 +407,28 @@ def test_build_grid_steps_empty_pool_when_only_video_and_images_only():
     assert agent.build_grid_steps([{"kind": "video"}], 4, True) == []
 
 
+def test_grid_graph_landscape_no_transpose():
+    g = agent.build_grid_graph(2, 1, 2, portrait=False)
+    assert "xstack=inputs=2:grid=2x1[vo]" in g
+    assert "transpose" not in g
+    assert "scale=960:1080" in g  # ячейка = половина холста 1920x1080
+
+
+def test_grid_graph_portrait_has_transpose_and_portrait_canvas():
+    g = agent.build_grid_graph(2, 2, 1, portrait=True)
+    # холст 1080x1920, две ячейки друг под другом
+    assert "scale=1080:960" in g
+    assert "xstack=inputs=2:grid=1x2[stacked]" in g
+    # поворот запечён в граф: --video-rotate на lavfi-выход не действует
+    assert "[stacked]transpose=1[vo]" in g
+
+
+def test_grid_graph_empty_cells_filled_with_black():
+    g = agent.build_grid_graph(3, 2, 2, portrait=False)
+    assert g.count("color=c=black:s=960x540") == 1  # 4 ячейки, 3 занято
+    assert "xstack=inputs=4:grid=2x2[vo]" in g
+
+
 def test_mpv_orientation_setter_deferred_until_restart():
     p = agent.MpvPlayer("/tmp/x.sock", [])
     assert p.orientation == "landscape"

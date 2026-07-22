@@ -33,7 +33,7 @@ import urllib.request
 from datetime import datetime
 from pathlib import Path
 
-AGENT_VERSION = "0.14.0"
+AGENT_VERSION = "0.15.0"
 
 log = logging.getLogger("signage")
 
@@ -497,6 +497,39 @@ def build_grid_steps(items: list[dict], cells: int,
     return [pool[i:i + cells] for i in range(0, len(pool), cells)]
 
 
+def build_grid_graph(n_items: int, rows: int, cols: int,
+                     portrait: bool) -> str:
+    """Строит lavfi-граф сетки: n_items входов mpv (vid1..vidN) по ячейкам.
+
+    Холст — эффективный экран зрителя: 1920×1080 или 1080×1920 для
+    портретного ТВ. Для портрета поворот запекается прямо в граф
+    (transpose=1, по часовой — как --video-rotate=90 в одиночном режиме),
+    потому что --video-rotate на выход --lavfi-complex не действует.
+    Пустые ячейки заполняются синтетическим чёрным источником.
+    """
+    canvas_w, canvas_h = (1080, 1920) if portrait else (1920, 1080)
+    cw, ch = canvas_w // cols, canvas_h // rows
+    cells = rows * cols
+    graph_parts, cell_labels = [], []
+    for idx in range(cells):
+        label = f"cell{idx}"
+        if idx < n_items:
+            vid = f"vid{idx + 1}"
+            graph_parts.append(
+                f"[{vid}]scale={cw}:{ch}:force_original_aspect_ratio=decrease,"
+                f"pad={cw}:{ch}:(ow-iw)/2:(oh-ih)/2:color=black[{label}]"
+            )
+        else:
+            graph_parts.append(f"color=c=black:s={cw}x{ch}:d=9999[{label}]")
+        cell_labels.append(f"[{label}]")
+    stack = f"{''.join(cell_labels)}xstack=inputs={cells}:grid={cols}x{rows}"
+    if portrait:
+        graph_parts.append(stack + "[stacked];[stacked]transpose=1[vo]")
+    else:
+        graph_parts.append(stack + "[vo]")
+    return ";".join(graph_parts)
+
+
 # ---------------------------------------------------------------- сервер
 
 class ServerClient:
@@ -707,13 +740,21 @@ class MpvPlayer:
         Path(self.socket_path).unlink(missing_ok=True)
         audio_args = ([f"--audio-device={self.audio_device}"]
                       if self.audio_device else [])
+        # --video-rotate не действует на выход --lavfi-complex (проверено):
+        # для сетки поворот запечён в сам граф фильтров (transpose), поэтому
+        # опция нужна только в обычном одиночном режиме.
         rotate_args = (["--video-rotate=90"]
-                      if self.orientation == "portrait" else [])
+                      if self.orientation == "portrait" and not composition
+                      else [])
         comp_args = []
         if composition:
             external_files, lavfi_complex = composition
             comp_args = [f"--external-file={f}" for f in external_files]
-            comp_args += ["--audio=no", f"--lavfi-complex={lavfi_complex}"]
+            # Аппаратные кадры (drm-prime/v4l2m2m) не проходят через lavfi —
+            # для склейки декодируем программно, иначе mpv падает и цикл
+            # перезапусков просвечивает системную консоль.
+            comp_args += ["--audio=no", "--hwdec=no",
+                          f"--lavfi-complex={lavfi_complex}"]
         cmd = ["mpv", f"--input-ipc-server={self.socket_path}",
                *MPV_ARGS, *audio_args, *rotate_args, *comp_args,
                *self.extra_args]
@@ -786,11 +827,6 @@ class MpvPlayer:
             self._close()
             stop.wait(timeout=3)
 
-    # Опорный размер ячейки сетки (композиция всё равно растягивается mpv
-    # на реальное разрешение экрана при полноэкранном выводе).
-    GRID_CELL_W = 960
-    GRID_CELL_H = 540
-
     def play_grid(self, items: list[dict], rows: int, cols: int,
                   stop: threading.Event) -> None:
         """Показывает несколько афиш одновременно на сетке rows×cols.
@@ -806,29 +842,14 @@ class MpvPlayer:
         файла).
         """
         cells = rows * cols
-        cw, ch = self.GRID_CELL_W, self.GRID_CELL_H
         duration = max((i.get("duration") or 10) for i in items)
         primary = max(items, key=lambda i: i.get("duration") or 10)
         ordered = [primary] + [i for i in items if i is not primary]
-        graph_parts, cell_labels = [], []
-        for idx in range(cells):
-            label = f"cell{idx}"
-            if idx < len(ordered):
-                vid = "vid1" if idx == 0 else f"vid{idx + 1}"
-                graph_parts.append(
-                    f"[{vid}]scale={cw}:{ch}:force_original_aspect_ratio=decrease,"
-                    f"pad={cw}:{ch}:(ow-iw)/2:(oh-ih)/2:color=black[{label}]"
-                )
-            else:
-                graph_parts.append(f"color=c=black:s={cw}x{ch}:d=9999[{label}]")
-            cell_labels.append(f"[{label}]")
-        graph_parts.append(
-            f"{''.join(cell_labels)}xstack=inputs={cells}:grid={cols}x{rows}[vo]"
+        graph = build_grid_graph(
+            min(len(ordered), cells), rows, cols,
+            portrait=self._desired_orientation == "portrait",
         )
-        composition = (
-            tuple(i["path"] for i in ordered[1:cells]),
-            ";".join(graph_parts),
-        )
+        composition = (tuple(i["path"] for i in ordered[1:cells]), graph)
         try:
             self._play_file(ordered[0]["path"], image_duration=99999,
                             timeout=duration, stop=stop,

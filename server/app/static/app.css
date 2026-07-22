@@ -301,6 +301,24 @@ pre { background: #10151d; color: #cdd6e4; padding: 12px; border-radius: 8px; ov
 .layout-opt input:checked + .card .layout-icon i { opacity: 1; }
 .layout-opt .card .n { font-size: 11px; }
 
+/* Схематичное превью экрана: рамка-«телевизор» с пронумерованными ячейками */
+.display-flex { display: flex; gap: 28px; flex-wrap: wrap; align-items: flex-start; }
+.display-controls { flex: 1 1 340px; min-width: 300px; }
+.display-preview { flex: 0 0 auto; }
+.grid-preview {
+  display: grid; gap: 5px; padding: 7px; margin-top: 6px;
+  background: #10151d; border: 3px solid var(--line); border-radius: 10px;
+  box-shadow: var(--shadow);
+}
+.grid-preview.landscape { width: 264px; height: 152px; }
+.grid-preview.portrait { width: 152px; height: 264px; }
+.grid-preview .cell {
+  background: var(--accent-soft); color: var(--accent);
+  display: grid; place-items: center; border-radius: 4px;
+  font-weight: 700; font-size: 15px; min-width: 0; min-height: 0;
+}
+.display-preview .small { max-width: 264px; margin-top: 8px; }
+
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
 @media (max-width: 820px) {
   .app { flex-direction: column; }
