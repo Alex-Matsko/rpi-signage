@@ -287,6 +287,11 @@ def delete_media_files(sha256: str) -> None:
 
 # ------------------------------------------------ композиции сеток (статика)
 
+# Версия алгоритма сборки композиций; увеличивать при любом изменении
+# рендера (входит в ключ кеша — старые файлы перестают использоваться
+# и удаляются плановой очисткой)
+GRID_RENDER_VERSION = 2
+
 # Кеш хешей готовых композиций: имя файла -> (mtime, size, sha256)
 _grid_sha_cache: dict[str, tuple[float, int, str]] = {}
 
@@ -305,8 +310,12 @@ def compose_grid_image(shas: list[str], rows: int, cols: int,
         else (1920, 1080)
     cw, ch = canvas_w // cols, canvas_h // rows
     cells = rows * cols
+    # Версия алгоритма сборки обязана входить в ключ кеша: иначе после
+    # изменения рендера (v0.16 «cover» -> v0.17 «целиком + размытый фон»)
+    # агентам продолжали бы уходить старые файлы из GRID_DIR.
     key = hashlib.sha256(
-        ("|".join(shas) + f":{rows}x{cols}:{orientation}").encode()
+        ("|".join(shas) +
+         f":{rows}x{cols}:{orientation}:r{GRID_RENDER_VERSION}").encode()
     ).hexdigest()[:32]
     out = config.GRID_DIR / f"grid-{key}.jpg"
 
