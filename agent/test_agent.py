@@ -389,13 +389,14 @@ def test_build_grid_steps_single_cell_unchanged():
     assert agent.build_grid_steps(items, 1, True) == [[items[0]], [items[1]]]
 
 
-def test_build_grid_steps_images_only_filters_video_and_chunks():
+def test_build_grid_steps_images_only_filters_video_and_fills_tail():
     img1, vid, img2, img3 = (
         {"kind": "image", "n": 1}, {"kind": "video", "n": 2},
         {"kind": "image", "n": 3}, {"kind": "image", "n": 4},
     )
     steps = agent.build_grid_steps([img1, vid, img2, img3], 2, True)
-    assert steps == [[img1, img2], [img3]]
+    # Хвост дополняется уже показанной афишей — экран всегда заполнен
+    assert steps == [[img1, img2], [img3, img1]]
 
 
 def test_build_grid_steps_includes_video_when_not_images_only():
@@ -405,6 +406,33 @@ def test_build_grid_steps_includes_video_when_not_images_only():
 
 def test_build_grid_steps_empty_pool_when_only_video_and_images_only():
     assert agent.build_grid_steps([{"kind": "video"}], 4, True) == []
+
+
+def test_build_grid_steps_no_duplicates_on_screen():
+    a, b = {"kind": "image", "n": 1}, {"kind": "image", "n": 2}
+    # Афиш меньше, чем ячеек: дубли на одном экране запрещены —
+    # шаг остаётся из двух (раскладка подберётся под шаг)
+    assert agent.build_grid_steps([a, b], 4, True) == [[a, b]]
+
+
+def test_build_grid_steps_five_posters_six_cells_split():
+    pool = [{"kind": "image", "n": i} for i in range(5)]
+    steps = agent.build_grid_steps(pool, 6, True)
+    # 5 не ложится в раскладку — 4 + 1 (во весь экран), без чёрных ячеек
+    assert [len(s) for s in steps] == [4, 1]
+
+
+def test_build_grid_steps_tail_fill_keeps_configured_grid():
+    pool = [{"kind": "image", "n": i} for i in range(5)]
+    steps = agent.build_grid_steps(pool, 4, True)
+    assert [len(s) for s in steps] == [4, 4]
+    assert steps[1] == [pool[4], pool[0], pool[1], pool[2]]
+
+
+def test_grid_dims_agent_matches_orientation():
+    assert agent.grid_dims(6, "landscape") == (2, 3)
+    assert agent.grid_dims(6, "portrait") == (3, 2)
+    assert agent.grid_dims(1, "portrait") == (1, 1)
 
 
 def test_grid_graph_landscape_no_transpose():

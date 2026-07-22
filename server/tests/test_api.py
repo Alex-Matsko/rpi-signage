@@ -483,7 +483,8 @@ def test_static_grid_prerendered_composites(admin, client):
     )
 
     manifest = client.get("/api/agent/manifest", headers=headers).json()
-    # 3 картинки при 2 ячейках -> композиция из двух + одиночная третья
+    # 3 картинки при 2 ячейках -> две полные композиции: хвост дополняется
+    # уже показанной афишей, чёрных ячеек не остаётся
     assert manifest["grid"] == {"layout": 2, "rows": 1, "cols": 1,
                                 "images_only": True}
     assert len(manifest["items"]) == 2
@@ -491,8 +492,11 @@ def test_static_grid_prerendered_composites(admin, client):
     assert comp["name"].startswith("Сетка: ")
     assert comp["kind"] == "image" and comp["mime"] == "image/jpeg"
     assert comp["url"].startswith("/api/agent/grid/")
-    single = manifest["items"][1]
-    assert single["poster_id"]  # третья афиша осталась одиночной
+    tail = manifest["items"][1]
+    assert tail["name"].startswith("Сетка: ")
+    assert tail["url"].startswith("/api/agent/grid/")
+    # c-three + уже показанная c-one, но не два одинаковых на экране
+    assert "c-three" in tail["name"] and tail["name"].count("c-one") == 1
 
     # Композиция скачивается агентом, хеш совпадает, холст — весь экран
     resp = client.get(comp["url"], headers=headers)

@@ -33,7 +33,7 @@ import urllib.request
 from datetime import datetime
 from pathlib import Path
 
-AGENT_VERSION = "0.17.0"
+AGENT_VERSION = "0.18.0"
 
 log = logging.getLogger("signage")
 
@@ -487,20 +487,50 @@ def item_is_active(item: dict, t: datetime) -> bool:
     return True
 
 
+# Раскладка -> (строки, столбцы) для горизонтального экрана; вертикальный —
+# транспонировано. Дублирует server/app/grid.py (агент — stdlib-only скрипт).
+_LANDSCAPE_DIMS = {1: (1, 1), 2: (1, 2), 3: (1, 3),
+                   4: (2, 2), 6: (2, 3), 8: (2, 4)}
+
+
+def grid_dims(layout: int, orientation: str) -> tuple[int, int]:
+    rows, cols = _LANDSCAPE_DIMS.get(layout, (1, 1))
+    if orientation == "portrait":
+        rows, cols = cols, rows
+    return rows, cols
+
+
 def build_grid_steps(items: list[dict], cells: int,
                      images_only: bool) -> list[list[dict]]:
     """Группирует действующие элементы в шаги показа по `cells` ячеек.
 
     cells=1 — обычная одиночная ротация (по элементу за шаг), без изменений.
-    При images_only=True видео полностью исключаются из ротации экрана —
-    на сеточном экране показываются только статичные изображения.
+    При images_only=True видео полностью исключаются из ротации экрана.
+    Каждый шаг заполняет экран целиком: неполный хвост дополняется уже
+    показанными афишами (по кругу), но без повторов на одном экране; если
+    афиш меньше, чем ячеек, и число не ложится в раскладку (например 5),
+    шаг разбивается на допустимые (5 -> 4 + 1 во весь экран).
     """
     if cells <= 1:
         return [[item] for item in items]
     pool = [i for i in items if not images_only or i["kind"] == "image"]
     if not pool:
         return []
-    return [pool[i:i + cells] for i in range(0, len(pool), cells)]
+    steps = [pool[i:i + cells] for i in range(0, len(pool), cells)]
+    tail = steps[-1]
+    if len(tail) < cells:
+        for cand in pool:
+            if len(tail) >= cells:
+                break
+            if cand not in tail:
+                tail.append(cand)
+    if len(tail) < cells and len(tail) not in _LANDSCAPE_DIMS:
+        rest = steps.pop()
+        while rest:
+            size = next(s for s in (8, 6, 4, 3, 2, 1) if s <= len(rest))
+            steps.append(rest[:size])
+            rest = rest[size:]
+    return steps
 
 
 def build_grid_graph(n_items: int, rows: int, cols: int,
@@ -1345,7 +1375,10 @@ def playback_loop(player, state: State, placeholder: Path | None,
         else:
             names = ", ".join(i["name"] for i in step)
             state.set_current({"name": names[:250], "sha256": step[0]["sha256"]})
-            player.play_grid(step, grid["rows"], grid["cols"], stop)
+            # Размер шага может быть меньше настроенного (хвост ротации) —
+            # раскладка подбирается под сам шаг, чтобы экран был заполнен
+            rows, cols = grid_dims(len(step), orientation)
+            player.play_grid(step, rows, cols, stop)
         index += 1
     player.shutdown()
 

@@ -140,7 +140,7 @@ def build_manifest(device: Device, db: Session) -> dict:
         # готовые картинки-композиции и показывает их как одиночные афиши —
         # без перезапусков mpv между переходами (и без просвечивания
         # консоли устройства). Видео на таком экране пропускается.
-        items = _compose_grid_items(items, rows, cols, device.orientation)
+        items = _compose_grid_items(items, rows * cols, device.orientation)
         rows = cols = 1
     version = hashlib.sha256(
         json.dumps(
@@ -165,16 +165,42 @@ def build_manifest(device: Device, db: Session) -> dict:
     }
 
 
-def _compose_grid_items(items: list[dict], rows: int, cols: int,
+def _chunk_grid_steps(pool: list, cells: int) -> list[list]:
+    """Режет пул на шаги показа так, чтобы каждый заполнял экран целиком.
+
+    Неполный последний шаг дополняется уже показанными афишами (по кругу
+    с начала пула), но одна афиша не появляется на экране дважды. Если
+    афиш меньше, чем ячеек, и их число не ложится ни в одну раскладку
+    (например 5), шаг разбивается на допустимые (5 -> 4 + 1 во весь экран).
+    """
+    if not pool:
+        return []
+    steps = [pool[i:i + cells] for i in range(0, len(pool), cells)]
+    tail = steps[-1]
+    if len(tail) < cells:
+        for cand in pool:
+            if len(tail) >= cells:
+                break
+            if cand not in tail:
+                tail.append(cand)
+    if len(tail) < cells and len(tail) not in (1, 2, 3, 4, 6, 8):
+        rest = steps.pop()
+        while rest:
+            size = next(s for s in (8, 6, 4, 3, 2, 1) if s <= len(rest))
+            steps.append(rest[:size])
+            rest = rest[size:]
+    return steps
+
+
+def _compose_grid_items(items: list[dict], cells: int,
                         orientation: str) -> list[dict]:
-    """Группирует статичные афиши в готовые композиции по rows×cols.
+    """Группирует статичные афиши в готовые композиции-сетки.
 
     Чтобы расписание соблюдалось офлайн, в одну композицию попадают только
     афиши с одинаковым окном показа/днями недели и общим будущим стартом;
     срок действия композиции — минимальный из сроков участниц. Видео
     пропускаются (семантика «только статичные изображения»).
     """
-    cells = rows * cols
     images = [i for i in items if i["kind"] == "image"]
     buckets: dict[tuple, list[dict]] = {}
     for item in images:
@@ -184,16 +210,14 @@ def _compose_grid_items(items: list[dict], rows: int, cols: int,
 
     result = []
     for members_all in buckets.values():
-        for chunk in (members_all[i:i + cells]
-                      for i in range(0, len(members_all), cells)):
+        for chunk in _chunk_grid_steps(members_all, cells):
             single = len(chunk) == 1
+            # Размер шага может отличаться от настроенного (хвост при
+            # нехватке афиш) — раскладка подбирается под сам шаг
+            crows, ccols = grid_dims(len(chunk), orientation)
             try:
-                # Неполный последний шаг из одной афиши — во весь экран
-                # (1×1), а не в ячейку с пустым соседом
                 comp = media.compose_grid_image(
-                    [m["sha256"] for m in chunk],
-                    1 if single else rows, 1 if single else cols,
-                    orientation)
+                    [m["sha256"] for m in chunk], crows, ccols, orientation)
             except media.MediaError:
                 result.extend(chunk)  # не собралось — показываем оригиналы
                 continue
